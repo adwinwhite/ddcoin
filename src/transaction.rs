@@ -16,7 +16,7 @@ impl Display for TransactionId {
     }
 }
 
-#[derive(Eq, PartialEq, Hash, Clone, Debug, Serialize)]
+#[derive(Eq, PartialEq, Hash, Clone, Debug, Serialize, Deserialize)]
 pub struct CoinAddress {
     pub_key: VerifyingKey,
 }
@@ -39,7 +39,7 @@ impl Display for CoinAddress {
     }
 }
 
-#[derive(Eq, PartialEq, Clone, Debug)]
+#[derive(Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
 pub struct Signature {
     sig: ed25519_dalek::Signature,
 }
@@ -50,7 +50,7 @@ impl Hash for Signature {
     }
 }
 
-#[derive(Eq, PartialEq, Hash, Clone, Debug, Serialize)]
+#[derive(Eq, PartialEq, Hash, Clone, Debug, Serialize, Deserialize)]
 struct TransactionInner {
     id: TransactionId,
     sender: CoinAddress,
@@ -59,7 +59,7 @@ struct TransactionInner {
     fee: u64,
 }
 
-#[derive(Eq, PartialEq, Hash, Clone, Debug)]
+#[derive(Eq, PartialEq, Hash, Clone, Debug, Serialize, Deserialize)]
 pub struct Transaction {
     inner: TransactionInner,
     signature: Signature,

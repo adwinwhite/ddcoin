@@ -1,6 +1,6 @@
 use std::collections::{hash_map::Entry, HashMap};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use iroh::{endpoint::SendStream, NodeId};
 use ractor::{Actor, RpcReplyPort};
 use tokio::io::AsyncWriteExt;
@@ -16,38 +16,9 @@ const PEER_SIZE_LIMIT: usize = 3;
 
 pub struct PeerHubActor;
 
-impl PeerHubActor {
-    async fn broadcast(
-        state: &mut PeerHubActorState,
-        node_id: NodeId,
-        msg: BroadcastMessage,
-    ) -> Result<()> {
-        // Only broadcast if we don't know it before.
-        match msg {
-            BroadcastMessage::AnnounceTransaction(txn_id) => {
-                if state.mempool.contains_key(&txn_id) {
-                    info!("Transaction {} already in mempool", txn_id);
-                    return Ok(());
-                }
-                let peer_msg = PeerMessage::Broadcast(msg);
-                let encoded = crate::serdes::encode(&peer_msg)?;
-                let len = encoded.len() as u32;
-                for (id, send_stream) in &mut state.peers {
-                    if *id == node_id {
-                        continue;
-                    }
-                    send_stream.write_all(&len.to_be_bytes()).await?;
-                    send_stream.write_all(&encoded).await?;
-                    send_stream.flush().await?;
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
 pub struct PeerHubActorState {
     peers: HashMap<NodeId, SendStream>,
+    annoucements: HashMap<TransactionId, NodeId>,
     mempool: HashMap<TransactionId, Transaction>,
     local_node_id: NodeId,
 }
@@ -58,7 +29,40 @@ impl PeerHubActorState {
             peers: HashMap::new(),
             mempool: HashMap::new(),
             local_node_id,
+            annoucements: HashMap::new(),
         }
+    }
+
+    async fn send_to_peer(&mut self, msg: &PeerMessage, node_id: NodeId) -> Result<()> {
+        let send_stream = self
+            .peers
+            .get_mut(&node_id)
+            .context("No such peer for this id")?;
+        let encoded = crate::serdes::encode(msg)?;
+        let len = encoded.len() as u32;
+        send_stream.write_all(&len.to_be_bytes()).await?;
+        send_stream.write_all(&encoded).await?;
+        send_stream.flush().await?;
+        Ok(())
+    }
+
+    async fn broadcast(&mut self, node_id: NodeId, msg: BroadcastMessage) -> Result<()> {
+        let peer_msg = PeerMessage::Broadcast(msg);
+        let encoded = crate::serdes::encode(&peer_msg)?;
+        let len = encoded.len() as u32;
+        for (id, send_stream) in &mut self.peers {
+            if *id == node_id {
+                continue;
+            }
+            send_stream.write_all(&len.to_be_bytes()).await?;
+            send_stream.write_all(&encoded).await?;
+            send_stream.flush().await?;
+        }
+        Ok(())
+    }
+
+    fn knows_transaction(&self, txn_id: &TransactionId) -> bool {
+        self.mempool.contains_key(txn_id) || self.annoucements.contains_key(txn_id)
     }
 }
 
@@ -69,6 +73,7 @@ pub enum PeerHubActorMessage {
     ShouldConnect(NodeId, RpcReplyPort<bool>),
     NewPeer(NodeId, SendStream, RpcReplyPort<bool>),
     Broadcast(NodeId, BroadcastMessage),
+    GetTransaction(NodeId, TransactionId),
     NewTransaction(Transaction),
 }
 
@@ -105,11 +110,23 @@ impl Actor for PeerHubActor {
                 }
             }
             PeerHubActorMessage::Broadcast(node_id, broadcast_msg) => {
+                // TODO: refactor broadcast part. broadcast doesn't happen here right now.
                 info!(
                     "PeerHubActor received: Broadcast {:?} - {:?}",
                     node_id, broadcast_msg
                 );
-                PeerHubActor::broadcast(state, node_id, broadcast_msg).await?;
+                match broadcast_msg {
+                    BroadcastMessage::AnnounceTransaction(txn_id) => {
+                        if state.knows_transaction(&txn_id) {
+                            info!("Transaction {} already in mempool or annoucements", txn_id);
+                        } else {
+                            state.annoucements.insert(txn_id, node_id);
+                            // Get Transaction.
+                            let peer_msg = PeerMessage::GetTransactionRequest(txn_id);
+                            state.send_to_peer(&peer_msg, node_id).await?;
+                        }
+                    }
+                }
             }
             PeerHubActorMessage::NewPeer(node_id, send_stream, reply) => {
                 info!("PeerHubActor received: NewPeer {:?}", node_id);
@@ -121,16 +138,31 @@ impl Actor for PeerHubActor {
                 }
             }
             PeerHubActorMessage::NewTransaction(txn) => {
-                info!("PeerHubActor received: NewTransaction {:?}", txn.id());
+                // Now we do the new transaction. It may come from user or peers.
+                info!("PeerHubActor received: NewTransaction {}", txn);
 
-                PeerHubActor::broadcast(
-                    state,
-                    state.local_node_id,
-                    BroadcastMessage::AnnounceTransaction(txn.id()),
-                )
-                .await?;
-                // NOTE: cannot insert before we broadcast.
-                state.mempool.insert(txn.id(), txn);
+                let txn_id = txn.id();
+                if state.mempool.contains_key(&txn_id) {
+                    info!("Transaction {} already in mempool", txn_id);
+                } else {
+                    state.mempool.insert(txn.id(), txn);
+                    // We broadcast when we do have the data.
+                    state
+                        .broadcast(
+                            state.local_node_id,
+                            BroadcastMessage::AnnounceTransaction(txn_id),
+                        )
+                        .await?;
+                    state.annoucements.remove(&txn_id);
+                }
+            }
+            PeerHubActorMessage::GetTransaction(node_id, txn_id) => {
+                let txn = state
+                    .mempool
+                    .get(&txn_id)
+                    .context("No such transaction in mempool")?;
+                let peer_msg = PeerMessage::GetTransactionResponse(txn.clone());
+                state.send_to_peer(&peer_msg, node_id).await?;
             }
         }
         Ok(())

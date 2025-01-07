@@ -53,7 +53,7 @@ pub async fn run() -> Result<(ActorRef<PeerHubActorMessage>, JoinHandle<()>)> {
     let handle = tokio::spawn(async move {
         while let Some(res) = tasks.join_next().await {
             if let Err(e) = res {
-                println!("Task failed: {:?}", e);
+                println!("Peer listener task failed: {:?}", e);
             }
         }
     });

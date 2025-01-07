@@ -4,16 +4,20 @@ use ractor::ActorRef;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::{peerhub::PeerHubActorMessage, transaction::TransactionId};
+use crate::{peerhub::PeerHubActorMessage, transaction::TransactionId, Transaction};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum BroadcastMessage {
     AnnounceTransaction(TransactionId),
 }
 
+// FIXME: use Box or something.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum PeerMessage {
     Broadcast(BroadcastMessage),
+    GetTransactionRequest(TransactionId),
+    GetTransactionResponse(Transaction),
 }
 
 pub struct Peer {
@@ -48,14 +52,19 @@ impl Peer {
                 PeerMessage::Broadcast(msg) => {
                     match msg {
                         BroadcastMessage::AnnounceTransaction(txn_id) => {
-                            // TODO: fetch transaction by id.
                             info!("Peer received: transaction announcement - {}", txn_id);
                         }
                     }
-                    ractor::cast!(
-                        self.peer_hub,
-                        PeerHubActorMessage::Broadcast(self.node_id, msg)
-                    )?;
+                    self.peer_hub
+                        .cast(PeerHubActorMessage::Broadcast(self.node_id, msg))?;
+                }
+                PeerMessage::GetTransactionRequest(txn_id) => {
+                    self.peer_hub
+                        .cast(PeerHubActorMessage::GetTransaction(self.node_id, txn_id))?;
+                }
+                PeerMessage::GetTransactionResponse(txn) => {
+                    self.peer_hub
+                        .cast(PeerHubActorMessage::NewTransaction(txn))?;
                 }
             }
         }
