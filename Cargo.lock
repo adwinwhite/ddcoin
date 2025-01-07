@@ -601,6 +601,7 @@ dependencies = [
  "serde",
  "tokio",
  "tokio-stream",
+ "tracing",
  "tracing-subscriber",
  "uuid",
 ]

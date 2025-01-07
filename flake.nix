@@ -19,6 +19,7 @@
       {
         devShell = mkShell {
           buildInputs = [
+            just
             mold
             (rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
               extensions = [ "rust-src" "rust-analyzer" ];
