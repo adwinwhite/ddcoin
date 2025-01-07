@@ -1,6 +1,6 @@
 use std::{fmt::Display, hash::Hash};
 
-use ed25519_dalek::{ed25519::signature::SignerMut, VerifyingKey};
+use ed25519_dalek::{ed25519::signature::SignerMut, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -24,9 +24,7 @@ pub struct CoinAddress {
 impl CoinAddress {
     pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self, anyhow::Error> {
         let pub_key = VerifyingKey::from_bytes(bytes)?;
-        Ok(Self {
-            pub_key
-        })
+        Ok(Self { pub_key })
     }
 }
 
@@ -60,9 +58,38 @@ struct TransactionInner {
 }
 
 #[derive(Eq, PartialEq, Hash, Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "TransactionValidator")]
 pub struct Transaction {
     inner: TransactionInner,
     signature: Signature,
+}
+
+// [serde validation trick here](https://github.com/serde-rs/serde-rs.github.io/pull/148/files).
+// Perhaps I should make a macro to duplicate the struct.
+#[derive(Deserialize)]
+struct TransactionValidator {
+    inner: TransactionInner,
+    signature: Signature,
+}
+
+impl std::convert::TryFrom<TransactionValidator> for Transaction {
+    type Error = anyhow::Error;
+    fn try_from(value: TransactionValidator) -> Result<Self, Self::Error> {
+        let msg = crate::serdes::encode(&value.inner).unwrap();
+        if let Ok(()) = value
+            .inner
+            .sender
+            .pub_key
+            .verify(&msg, &value.signature.sig)
+        {
+            Ok(Transaction {
+                inner: value.inner,
+                signature: value.signature,
+            })
+        } else {
+            Err(anyhow::anyhow!("Invalid transaction"))
+        }
+    }
 }
 
 impl Transaction {
@@ -99,7 +126,11 @@ impl Display for Transaction {
         write!(
             f,
             "Transaction: id: {}, sender: {}, receiver: {}, amount: {}, fee: {}",
-            self.inner.id, self.inner.sender, self.inner.receiver, self.inner.amount, self.inner.fee
+            self.inner.id,
+            self.inner.sender,
+            self.inner.receiver,
+            self.inner.amount,
+            self.inner.fee
         )
     }
 }

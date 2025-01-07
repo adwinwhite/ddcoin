@@ -1,4 +1,7 @@
-use std::collections::{hash_map::Entry, HashMap};
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    fmt::Display,
+};
 
 use anyhow::{Context, Result};
 use iroh::{endpoint::SendStream, NodeId};
@@ -77,6 +80,24 @@ pub enum PeerHubActorMessage {
     NewTransaction(Transaction),
 }
 
+impl Display for PeerHubActorMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PeerHubActorMessage::ShouldConnect(node_id, _) => {
+                write!(f, "ShouldConnect({})", node_id)
+            }
+            PeerHubActorMessage::NewPeer(node_id, _, _) => write!(f, "NewPeer({})", node_id),
+            PeerHubActorMessage::Broadcast(node_id, broadcast_msg) => {
+                write!(f, "Broadcast({}, {})", node_id, broadcast_msg)
+            }
+            PeerHubActorMessage::GetTransaction(node_id, txn_id) => {
+                write!(f, "GetTransaction({}, {})", node_id, txn_id)
+            }
+            PeerHubActorMessage::NewTransaction(txn) => write!(f, "NewTransaction({})", txn),
+        }
+    }
+}
+
 impl Actor for PeerHubActor {
     type Msg = PeerHubActorMessage;
     type State = PeerHubActorState;
@@ -96,6 +117,7 @@ impl Actor for PeerHubActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> std::result::Result<(), ractor::ActorProcessingErr> {
+        info!("PeerHubActor received: {}", message);
         match message {
             PeerHubActorMessage::ShouldConnect(node_id, reply_port) => {
                 info!("PeerHubActor received: ShouldConnect {:?}", node_id);
@@ -111,10 +133,6 @@ impl Actor for PeerHubActor {
             }
             PeerHubActorMessage::Broadcast(node_id, broadcast_msg) => {
                 // TODO: refactor broadcast part. broadcast doesn't happen here right now.
-                info!(
-                    "PeerHubActor received: Broadcast {:?} - {:?}",
-                    node_id, broadcast_msg
-                );
                 match broadcast_msg {
                     BroadcastMessage::AnnounceTransaction(txn_id) => {
                         if state.knows_transaction(&txn_id) {
@@ -129,7 +147,6 @@ impl Actor for PeerHubActor {
                 }
             }
             PeerHubActorMessage::NewPeer(node_id, send_stream, reply) => {
-                info!("PeerHubActor received: NewPeer {:?}", node_id);
                 if let Entry::Vacant(e) = state.peers.entry(node_id) {
                     e.insert(send_stream);
                     reply.send(true)?;
@@ -139,8 +156,6 @@ impl Actor for PeerHubActor {
             }
             PeerHubActorMessage::NewTransaction(txn) => {
                 // Now we do the new transaction. It may come from user or peers.
-                info!("PeerHubActor received: NewTransaction {}", txn);
-
                 let txn_id = txn.id();
                 if state.mempool.contains_key(&txn_id) {
                     info!("Transaction {} already in mempool", txn_id);

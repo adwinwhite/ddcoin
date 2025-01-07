@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use anyhow::Result;
 use iroh::{endpoint::RecvStream, NodeId};
 use ractor::ActorRef;
@@ -11,6 +13,16 @@ pub enum BroadcastMessage {
     AnnounceTransaction(TransactionId),
 }
 
+impl Display for BroadcastMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BroadcastMessage::AnnounceTransaction(txn_id) => {
+                write!(f, "AnnounceTransaction({})", txn_id)
+            }
+        }
+    }
+}
+
 // FIXME: use Box or something.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Serialize, Deserialize)]
@@ -18,6 +30,20 @@ pub enum PeerMessage {
     Broadcast(BroadcastMessage),
     GetTransactionRequest(TransactionId),
     GetTransactionResponse(Transaction),
+}
+
+impl Display for PeerMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PeerMessage::Broadcast(msg) => write!(f, "Broadcast({})", msg),
+            PeerMessage::GetTransactionRequest(txn_id) => {
+                write!(f, "GetTransactionRequest({})", txn_id)
+            }
+            PeerMessage::GetTransactionResponse(txn) => {
+                write!(f, "GetTransactionResponse({})", txn)
+            }
+        }
+    }
 }
 
 pub struct Peer {
@@ -48,13 +74,9 @@ impl Peer {
             let mut buf = vec![0u8; size];
             self.recv_stream.read_exact(&mut buf).await?;
             let message: PeerMessage = crate::serdes::decode(&buf)?;
+            info!("Peer received: {}", message);
             match message {
                 PeerMessage::Broadcast(msg) => {
-                    match msg {
-                        BroadcastMessage::AnnounceTransaction(txn_id) => {
-                            info!("Peer received: transaction announcement - {}", txn_id);
-                        }
-                    }
                     self.peer_hub
                         .cast(PeerHubActorMessage::Broadcast(self.node_id, msg))?;
                 }
