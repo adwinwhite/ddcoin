@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use anyhow::{Context, Result};
-use iroh::{discovery::DiscoveryItem, Endpoint, NodeId};
+use iroh::{Endpoint, NodeId, discovery::DiscoveryItem};
 use ractor::ActorRef;
 use tokio::{io::AsyncWriteExt, select, task::JoinSet};
 use tokio_stream::StreamExt;

@@ -1,10 +1,10 @@
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{HashMap, hash_map::Entry},
     fmt::Display,
 };
 
 use anyhow::{Context, Result};
-use iroh::{endpoint::SendStream, NodeId};
+use iroh::{NodeId, endpoint::SendStream};
 use ractor::{Actor, RpcReplyPort};
 use tokio::io::AsyncWriteExt;
 use tracing::info;
@@ -75,7 +75,7 @@ impl PeerHubActorState {
 pub enum PeerHubActorMessage {
     ShouldConnect(NodeId, RpcReplyPort<bool>),
     NewPeer(NodeId, SendStream, RpcReplyPort<bool>),
-    Broadcast(NodeId, BroadcastMessage),
+    AnnounceTransaction(NodeId, TransactionId),
     GetTransaction(NodeId, TransactionId),
     NewTransaction(Transaction),
 }
@@ -87,8 +87,8 @@ impl Display for PeerHubActorMessage {
                 write!(f, "ShouldConnect({})", node_id)
             }
             PeerHubActorMessage::NewPeer(node_id, _, _) => write!(f, "NewPeer({})", node_id),
-            PeerHubActorMessage::Broadcast(node_id, broadcast_msg) => {
-                write!(f, "Broadcast({}, {})", node_id, broadcast_msg)
+            PeerHubActorMessage::AnnounceTransaction(node_id, txn_id) => {
+                write!(f, "AnnounceTransaction({}, {})", node_id, txn_id)
             }
             PeerHubActorMessage::GetTransaction(node_id, txn_id) => {
                 write!(f, "GetTransaction({}, {})", node_id, txn_id)
@@ -131,19 +131,14 @@ impl Actor for PeerHubActor {
                     info!("{} accepting connection from {:?}", should_connect, node_id);
                 }
             }
-            PeerHubActorMessage::Broadcast(node_id, broadcast_msg) => {
-                // TODO: refactor broadcast part. broadcast doesn't happen here right now.
-                match broadcast_msg {
-                    BroadcastMessage::AnnounceTransaction(txn_id) => {
-                        if state.knows_transaction(&txn_id) {
-                            info!("Transaction {} already in mempool or annoucements", txn_id);
-                        } else {
-                            state.annoucements.insert(txn_id, node_id);
-                            // Get Transaction.
-                            let peer_msg = PeerMessage::GetTransactionRequest(txn_id);
-                            state.send_to_peer(&peer_msg, node_id).await?;
-                        }
-                    }
+            PeerHubActorMessage::AnnounceTransaction(node_id, txn_id) => {
+                if state.knows_transaction(&txn_id) {
+                    info!("Transaction {} already in mempool or annoucements", txn_id);
+                } else {
+                    state.annoucements.insert(txn_id, node_id);
+                    // Get Transaction.
+                    let peer_msg = PeerMessage::GetTransactionRequest(txn_id);
+                    state.send_to_peer(&peer_msg, node_id).await?;
                 }
             }
             PeerHubActorMessage::NewPeer(node_id, send_stream, reply) => {

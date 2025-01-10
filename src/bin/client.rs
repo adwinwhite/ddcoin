@@ -68,7 +68,7 @@ fn create_transactions(
         let (receiver_pub_key, amount, input) = match params.len() {
             3 => (params[0], params[1], params[2]),
             _ => {
-            return Err(anyhow::anyhow!("Too many/few parameters"));
+                return Err(anyhow::anyhow!("Too many/few parameters"));
             }
         };
         let receiver_pub_key = hex_to_bytes(receiver_pub_key)?;

@@ -1,6 +1,6 @@
 use std::{fmt::Display, hash::Hash};
 
-use ed25519_dalek::{ed25519::signature::SignerMut, Verifier, VerifyingKey};
+use ed25519_dalek::{Verifier, VerifyingKey, ed25519::signature::SignerMut};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard();
 

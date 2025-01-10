@@ -11,15 +11,15 @@ pub use transaction::{CoinAddress, Transaction};
 
 use anyhow::Result;
 use iroh::{
-    discovery::{
-        dns::DnsDiscovery, local_swarm_discovery::LocalSwarmDiscovery, pkarr::PkarrPublisher,
-        ConcurrentDiscovery,
-    },
     Endpoint,
+    discovery::{
+        ConcurrentDiscovery, dns::DnsDiscovery, local_swarm_discovery::LocalSwarmDiscovery,
+        pkarr::PkarrPublisher,
+    },
 };
-use new_peer_watcher::{IncomingConnectionListener, NewPeerStreamSubscriber, ALPN};
+use new_peer_watcher::{ALPN, IncomingConnectionListener, NewPeerStreamSubscriber};
 use peerhub::PeerHubActor;
-use ractor::{concurrency::JoinHandle, Actor, ActorRef};
+use ractor::{Actor, ActorRef, concurrency::JoinHandle};
 use tokio::task::JoinSet;
 
 pub async fn run() -> Result<(ActorRef<PeerHubActorMessage>, JoinHandle<()>)> {

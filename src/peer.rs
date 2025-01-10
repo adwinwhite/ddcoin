@@ -1,12 +1,12 @@
 use std::fmt::Display;
 
 use anyhow::Result;
-use iroh::{endpoint::RecvStream, NodeId};
+use iroh::{NodeId, endpoint::RecvStream};
 use ractor::ActorRef;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::{peerhub::PeerHubActorMessage, transaction::TransactionId, Transaction};
+use crate::{Transaction, peerhub::PeerHubActorMessage, transaction::TransactionId};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum BroadcastMessage {
@@ -76,10 +76,15 @@ impl Peer {
             let message: PeerMessage = crate::serdes::decode(&buf)?;
             info!("Peer received: {}", message);
             match message {
-                PeerMessage::Broadcast(msg) => {
-                    self.peer_hub
-                        .cast(PeerHubActorMessage::Broadcast(self.node_id, msg))?;
-                }
+                PeerMessage::Broadcast(msg) => match msg {
+                    BroadcastMessage::AnnounceTransaction(txn_id) => {
+                        self.peer_hub
+                            .cast(PeerHubActorMessage::AnnounceTransaction(
+                                self.node_id,
+                                txn_id,
+                            ))?;
+                    }
+                },
                 PeerMessage::GetTransactionRequest(txn_id) => {
                     self.peer_hub
                         .cast(PeerHubActorMessage::GetTransaction(self.node_id, txn_id))?;
