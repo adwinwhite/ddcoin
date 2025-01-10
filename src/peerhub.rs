@@ -78,6 +78,8 @@ pub enum PeerHubActorMessage {
     AnnounceTransaction(NodeId, TransactionId),
     GetTransaction(NodeId, TransactionId),
     NewTransaction(Transaction),
+    QueryTransaction(TransactionId, RpcReplyPort<Option<Transaction>>),
+    QueryPeers(RpcReplyPort<Vec<NodeId>>),
 }
 
 impl Display for PeerHubActorMessage {
@@ -94,6 +96,12 @@ impl Display for PeerHubActorMessage {
                 write!(f, "GetTransaction({}, {})", node_id, txn_id)
             }
             PeerHubActorMessage::NewTransaction(txn) => write!(f, "NewTransaction({})", txn),
+            PeerHubActorMessage::QueryTransaction(transaction_id, _rpc_reply_port) => {
+                write!(f, "QueryTransaction({})", transaction_id)
+            }
+            PeerHubActorMessage::QueryPeers(_reply) => {
+                write!(f, "QueryPeers")
+            }
         }
     }
 }
@@ -120,7 +128,6 @@ impl Actor for PeerHubActor {
         info!("PeerHubActor received: {}", message);
         match message {
             PeerHubActorMessage::ShouldConnect(node_id, reply_port) => {
-                info!("PeerHubActor received: ShouldConnect {:?}", node_id);
                 if state.peers.len() >= PEER_SIZE_LIMIT {
                     reply_port.send(false)?;
                     info!("Rejecting connection from {:?}", node_id);
@@ -128,7 +135,10 @@ impl Actor for PeerHubActor {
                     let contains = state.peers.contains_key(&node_id);
                     let should_connect = !contains;
                     reply_port.send(should_connect)?;
-                    info!("{} accepting connection from {:?}", should_connect, node_id);
+                    info!(
+                        "{}: we should allow connection with {:?}",
+                        should_connect, node_id
+                    );
                 }
             }
             PeerHubActorMessage::AnnounceTransaction(node_id, txn_id) => {
@@ -173,6 +183,13 @@ impl Actor for PeerHubActor {
                     .context("No such transaction in mempool")?;
                 let peer_msg = PeerMessage::GetTransactionResponse(txn.clone());
                 state.send_to_peer(&peer_msg, node_id).await?;
+            }
+            PeerHubActorMessage::QueryTransaction(txn_id, reply) => {
+                let txn = state.mempool.get(&txn_id).cloned();
+                reply.send(txn)?;
+            }
+            PeerHubActorMessage::QueryPeers(reply) => {
+                reply.send(state.peers.keys().cloned().collect::<Vec<_>>())?;
             }
         }
         Ok(())

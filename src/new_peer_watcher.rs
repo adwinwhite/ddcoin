@@ -54,7 +54,13 @@ impl NewPeerStreamSubscriber {
                         continue;
                     }
 
-                    let conn = self.endpoint.connect(item.node_addr, ALPN).await?;
+                    let conn = match self.endpoint.connect(item.node_addr, ALPN).await {
+                        Ok(conn) => conn,
+                        Err(e) => {
+                            warn!("Failed to connect to remote: {:?}", e);
+                            continue;
+                        }
+                    };
                     let (mut tx, rx) = conn.open_bi().await?;
 
                     tx.write_all(self.endpoint.node_id().as_bytes()).await?;
@@ -92,7 +98,17 @@ impl IncomingConnectionListener {
             select! {
                 pending_conn = self.endpoint.accept() => {
                     let pending_conn = pending_conn.context("Endpoint cannot listen anymore")?;
-                    let conn = pending_conn.accept()?.await?;
+                    let Ok(connecting) = pending_conn.accept() else {
+                        warn!("Incoming connection has error");
+                        continue;
+                    };
+                    let conn = match connecting.await {
+                        Ok(conn) => conn,
+                        Err(e) => {
+                            warn!("Incoming connection has error: {:?}", e);
+                            continue;
+                        }
+                    };
                     let (tx, mut rx) = conn.accept_bi().await?;
                     let mut node_id_buf = [0u8; 32];
                     rx.read_exact(&mut node_id_buf).await?;
