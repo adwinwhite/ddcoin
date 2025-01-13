@@ -6,11 +6,15 @@ use ractor::ActorRef;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::{Transaction, peerhub::PeerHubActorMessage, transaction::TransactionId};
+use crate::{
+    Block, Transaction, block::BlockId, peerhub::PeerHubActorMessage, serdes::transport,
+    transaction::TransactionId,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum BroadcastMessage {
     AnnounceTransaction(TransactionId),
+    AnnounceBlock(BlockId),
 }
 
 impl Display for BroadcastMessage {
@@ -18,6 +22,9 @@ impl Display for BroadcastMessage {
         match self {
             BroadcastMessage::AnnounceTransaction(txn_id) => {
                 write!(f, "AnnounceTransaction({})", txn_id)
+            }
+            BroadcastMessage::AnnounceBlock(block_id) => {
+                write!(f, "AnnounceBlock({})", block_id)
             }
         }
     }
@@ -30,6 +37,9 @@ pub enum PeerMessage {
     Broadcast(BroadcastMessage),
     GetTransactionRequest(TransactionId),
     GetTransactionResponse(Transaction),
+    GetBlockRequest(BlockId),
+    // We may need fetch previous blocks as well so we need to know block's source.
+    GetBlockResponse(NodeId, Block),
 }
 
 impl Display for PeerMessage {
@@ -41,6 +51,12 @@ impl Display for PeerMessage {
             }
             PeerMessage::GetTransactionResponse(txn) => {
                 write!(f, "GetTransactionResponse({})", txn)
+            }
+            PeerMessage::GetBlockRequest(block_id) => {
+                write!(f, "GetBlockRequest({})", block_id)
+            }
+            PeerMessage::GetBlockResponse(node_id, block) => {
+                write!(f, "GetBlockResponse({}, {})", node_id, block)
             }
         }
     }
@@ -73,7 +89,7 @@ impl Peer {
             let size = u32::from_be_bytes(len_buf) as usize;
             let mut buf = vec![0u8; size];
             self.recv_stream.read_exact(&mut buf).await?;
-            let message: PeerMessage = crate::serdes::decode(&buf)?;
+            let message: PeerMessage = transport::decode(&buf)?;
             info!("Peer received: {}", message);
             match message {
                 PeerMessage::Broadcast(msg) => match msg {
@@ -84,6 +100,10 @@ impl Peer {
                                 txn_id,
                             ))?;
                     }
+                    BroadcastMessage::AnnounceBlock(block_id) => {
+                        self.peer_hub
+                            .cast(PeerHubActorMessage::AnnounceBlock(self.node_id, block_id))?;
+                    }
                 },
                 PeerMessage::GetTransactionRequest(txn_id) => {
                     self.peer_hub
@@ -92,6 +112,14 @@ impl Peer {
                 PeerMessage::GetTransactionResponse(txn) => {
                     self.peer_hub
                         .cast(PeerHubActorMessage::NewTransaction(txn))?;
+                }
+                PeerMessage::GetBlockRequest(block_id) => {
+                    self.peer_hub
+                        .cast(PeerHubActorMessage::GetBlock(self.node_id, block_id))?;
+                }
+                PeerMessage::GetBlockResponse(node_id, block) => {
+                    self.peer_hub
+                        .cast(PeerHubActorMessage::NewBlock(node_id, block))?;
                 }
             }
         }

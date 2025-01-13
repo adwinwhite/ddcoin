@@ -10,6 +10,8 @@ use tokio::io::AsyncWriteExt;
 use tracing::info;
 
 use crate::{
+    Block,
+    block::{BlockId, SequenceNo},
     peer::{BroadcastMessage, PeerMessage},
     transaction::{Transaction, TransactionId},
 };
@@ -23,16 +25,24 @@ pub struct PeerHubActorState {
     peers: HashMap<NodeId, SendStream>,
     annoucements: HashMap<TransactionId, NodeId>,
     mempool: HashMap<TransactionId, Transaction>,
+    blocks: HashMap<BlockId, Block>,
+    leading_block: BlockId,
+    leading_block_sequence_no: SequenceNo,
     local_node_id: NodeId,
 }
 
 impl PeerHubActorState {
     pub fn new(local_node_id: NodeId) -> Self {
+        let mut blocks = HashMap::new();
+        blocks.insert(BlockId::GENESIS, Block::GENESIS);
         Self {
             peers: HashMap::new(),
-            mempool: HashMap::new(),
-            local_node_id,
             annoucements: HashMap::new(),
+            mempool: HashMap::new(),
+            blocks,
+            leading_block: BlockId::GENESIS,
+            leading_block_sequence_no: 0,
+            local_node_id,
         }
     }
 
@@ -41,7 +51,7 @@ impl PeerHubActorState {
             .peers
             .get_mut(&node_id)
             .context("No such peer for this id")?;
-        let encoded = crate::serdes::encode(msg)?;
+        let encoded = crate::serdes::transport::encode(msg)?;
         let len = encoded.len() as u32;
         send_stream.write_all(&len.to_be_bytes()).await?;
         send_stream.write_all(&encoded).await?;
@@ -51,7 +61,7 @@ impl PeerHubActorState {
 
     async fn broadcast(&mut self, node_id: NodeId, msg: BroadcastMessage) -> Result<()> {
         let peer_msg = PeerMessage::Broadcast(msg);
-        let encoded = crate::serdes::encode(&peer_msg)?;
+        let encoded = crate::serdes::transport::encode(&peer_msg)?;
         let len = encoded.len() as u32;
         for (id, send_stream) in &mut self.peers {
             if *id == node_id {
@@ -67,6 +77,21 @@ impl PeerHubActorState {
     fn knows_transaction(&self, txn_id: &TransactionId) -> bool {
         self.mempool.contains_key(txn_id) || self.annoucements.contains_key(txn_id)
     }
+
+    // FIXME: prevent malicious actor sending cycles and causing infinite loop.
+    fn block_root(&self, block_id: &BlockId) -> BlockId {
+        let mut current_id = *block_id;
+        loop {
+            if current_id == BlockId::GENESIS {
+                return BlockId::GENESIS;
+            }
+            if let Some(block) = self.blocks.get(&current_id) {
+                current_id = block.prev_id();
+            } else {
+                return *block_id;
+            }
+        }
+    }
 }
 
 // FIXME: optimize enum size here.
@@ -76,10 +101,16 @@ pub enum PeerHubActorMessage {
     ShouldConnect(NodeId, RpcReplyPort<bool>),
     NewPeer(NodeId, SendStream, RpcReplyPort<bool>),
     AnnounceTransaction(NodeId, TransactionId),
+    AnnounceBlock(NodeId, BlockId),
     GetTransaction(NodeId, TransactionId),
+    GetBlock(NodeId, BlockId),
     NewTransaction(Transaction),
+    // We receives a new block from node.
+    NewBlock(NodeId, Block),
     QueryTransaction(TransactionId, RpcReplyPort<Option<Transaction>>),
+    QueryBlock(BlockId, RpcReplyPort<Option<Block>>),
     QueryPeers(RpcReplyPort<Vec<NodeId>>),
+    QueryLocalNodeId(RpcReplyPort<NodeId>),
 }
 
 impl Display for PeerHubActorMessage {
@@ -96,11 +127,26 @@ impl Display for PeerHubActorMessage {
                 write!(f, "GetTransaction({}, {})", node_id, txn_id)
             }
             PeerHubActorMessage::NewTransaction(txn) => write!(f, "NewTransaction({})", txn),
-            PeerHubActorMessage::QueryTransaction(transaction_id, _rpc_reply_port) => {
-                write!(f, "QueryTransaction({})", transaction_id)
+            PeerHubActorMessage::QueryTransaction(txn_id, _rpc_reply_port) => {
+                write!(f, "QueryTransaction({})", txn_id)
             }
             PeerHubActorMessage::QueryPeers(_reply) => {
                 write!(f, "QueryPeers")
+            }
+            PeerHubActorMessage::AnnounceBlock(node_id, block_id) => {
+                write!(f, "AnnounceBlock({}, {})", node_id, block_id)
+            }
+            PeerHubActorMessage::GetBlock(node_id, block_id) => {
+                write!(f, "GetBlock({}, {})", node_id, block_id)
+            }
+            PeerHubActorMessage::NewBlock(node_id, block) => {
+                write!(f, "NewBlock({}, {})", node_id, block)
+            }
+            PeerHubActorMessage::QueryBlock(block_id, _rpc_reply_port) => {
+                write!(f, "QueryBlock({})", block_id)
+            }
+            PeerHubActorMessage::QueryLocalNodeId(_) => {
+                write!(f, "QueryLocalNodeId")
             }
         }
     }
@@ -190,6 +236,61 @@ impl Actor for PeerHubActor {
             }
             PeerHubActorMessage::QueryPeers(reply) => {
                 reply.send(state.peers.keys().cloned().collect::<Vec<_>>())?;
+            }
+            PeerHubActorMessage::AnnounceBlock(node_id, block_id) => {
+                if state.blocks.contains_key(&block_id) {
+                    info!("We already have block of id {}", block_id);
+                    return Ok(());
+                }
+
+                // Get Block.
+                let peer_msg = PeerMessage::GetBlockRequest(block_id);
+                state.send_to_peer(&peer_msg, node_id).await?;
+            }
+            PeerHubActorMessage::GetBlock(node_id, block_id) => {
+                let block = state
+                    .blocks
+                    .get(&block_id)
+                    .cloned()
+                    .context("No such block")?;
+                let peer_msg = PeerMessage::GetBlockResponse(state.local_node_id, block.clone());
+                state.send_to_peer(&peer_msg, node_id).await?;
+            }
+            PeerHubActorMessage::NewBlock(node_id, block) => {
+                if block.seqno() <= state.leading_block_sequence_no {
+                    info!("We already have block of sequence no {}", block.seqno());
+                    return Ok(());
+                }
+
+                let block_id = block.id();
+                let block_prev_id = block.prev_id();
+                let seqno = block.seqno();
+                state.blocks.insert(block.id(), block);
+                // Follow valid block with highest seqno.
+                let local_root = state.block_root(&block_prev_id);
+                if local_root == BlockId::GENESIS {
+                    state.leading_block = block_id;
+                    state.leading_block_sequence_no = seqno;
+                    state
+                        .broadcast(
+                            state.local_node_id,
+                            BroadcastMessage::AnnounceBlock(block_id),
+                        )
+                        .await?;
+                } else {
+                    // Get missing block.
+                    // If the miner is ourself, we shouldn't have missing blocks thus won't execute
+                    // below.
+                    let peer_msg = PeerMessage::GetBlockRequest(local_root);
+                    state.send_to_peer(&peer_msg, node_id).await?;
+                }
+            }
+            PeerHubActorMessage::QueryBlock(block_id, reply) => {
+                let block = state.blocks.get(&block_id).cloned();
+                reply.send(block)?;
+            }
+            PeerHubActorMessage::QueryLocalNodeId(reply) => {
+                reply.send(state.local_node_id)?;
             }
         }
         Ok(())

@@ -2,6 +2,7 @@ use std::{fmt::Display, hash::Hash};
 
 use ed25519_dalek::{Verifier, VerifyingKey, ed25519::signature::SignerMut};
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 use uuid::Uuid;
 
 #[derive(Eq, PartialEq, Hash, Clone, Copy, Debug, Serialize, Deserialize)]
@@ -18,19 +19,26 @@ impl Display for TransactionId {
 
 #[derive(Eq, PartialEq, Hash, Clone, Debug, Serialize, Deserialize)]
 pub struct CoinAddress {
-    pub_key: VerifyingKey,
+    pub(crate) pub_key: [u8; 32],
 }
 
 impl CoinAddress {
     pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self, anyhow::Error> {
-        let pub_key = VerifyingKey::from_bytes(bytes)?;
-        Ok(Self { pub_key })
+        Ok(Self { pub_key: *bytes })
+    }
+}
+
+impl From<VerifyingKey> for CoinAddress {
+    fn from(pub_key: VerifyingKey) -> Self {
+        Self {
+            pub_key: pub_key.to_bytes(),
+        }
     }
 }
 
 impl Display for CoinAddress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for b in self.pub_key.as_bytes() {
+        for b in self.pub_key {
             write!(f, "{:02x}", b)?;
         }
         Ok(())
@@ -39,12 +47,30 @@ impl Display for CoinAddress {
 
 #[derive(Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
 pub struct Signature {
-    sig: ed25519_dalek::Signature,
+    #[serde(with = "BigArray")]
+    pub(crate) sig: [u8; 64],
 }
 
 impl Hash for Signature {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.sig.to_bytes().hash(state);
+        self.sig.hash(state);
+    }
+}
+
+impl From<ed25519_dalek::Signature> for Signature {
+    fn from(sig: ed25519_dalek::Signature) -> Self {
+        Self {
+            sig: sig.to_bytes(),
+        }
+    }
+}
+
+impl Display for Signature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for b in self.sig {
+            write!(f, "{:02x}", b)?;
+        }
+        Ok(())
     }
 }
 
@@ -75,13 +101,12 @@ struct TransactionValidator {
 impl std::convert::TryFrom<TransactionValidator> for Transaction {
     type Error = anyhow::Error;
     fn try_from(value: TransactionValidator) -> Result<Self, Self::Error> {
-        let msg = crate::serdes::encode(&value.inner).unwrap();
-        if let Ok(()) = value
-            .inner
-            .sender
-            .pub_key
-            .verify(&msg, &value.signature.sig)
-        {
+        let msg = crate::serdes::hashsig::encode(&value.inner).unwrap();
+        let verifying_key = VerifyingKey::from_bytes(&value.inner.sender.pub_key)?;
+        if let Ok(()) = verifying_key.verify(
+            &msg,
+            &ed25519_dalek::Signature::from_bytes(&value.signature.sig),
+        ) {
             Ok(Transaction {
                 inner: value.inner,
                 signature: value.signature,
@@ -101,7 +126,7 @@ impl Transaction {
     ) -> Self {
         let id = Uuid::new_v4();
         let sender = CoinAddress {
-            pub_key: signing_key.verifying_key(),
+            pub_key: signing_key.verifying_key().to_bytes(),
         };
         let inner = TransactionInner {
             id: TransactionId { id },
@@ -110,9 +135,11 @@ impl Transaction {
             amount,
             fee,
         };
-        let msg = crate::serdes::encode(&inner).unwrap();
+        let msg = crate::serdes::hashsig::encode(&inner).unwrap();
         let signature = signing_key.sign(&msg);
-        let signature = Signature { sig: signature };
+        let signature = Signature {
+            sig: signature.into(),
+        };
         Self { inner, signature }
     }
 
