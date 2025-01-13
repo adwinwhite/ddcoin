@@ -19,7 +19,7 @@ use iroh::{
         pkarr::PkarrPublisher,
     },
 };
-use new_peer_watcher::{ALPN, IncomingConnectionListener, NewPeerStreamSubscriber};
+use new_peer_watcher::{IncomingConnectionListener, NewPeerStreamSubscriber};
 use peerhub::PeerHubActor;
 use ractor::{Actor, ActorRef};
 use tokio::task::{JoinHandle, JoinSet};
@@ -27,6 +27,7 @@ use tokio::task::{JoinHandle, JoinSet};
 pub struct Config {
     secret_key: iroh::SecretKey,
     pub discovery: Vec<Box<dyn iroh::discovery::Discovery>>,
+    pub alpn: Vec<u8>,
 }
 
 impl Default for Config {
@@ -40,12 +41,13 @@ impl Default for Config {
         Self {
             secret_key,
             discovery,
+            alpn: b"ddcoin/1.0".to_vec(),
         }
     }
 }
 
 impl Config {
-    pub fn with_local_discovery() -> Self {
+    pub fn with_local_discovery(alpn: &[u8]) -> Self {
         let secret_key = iroh::SecretKey::generate(rand::rngs::OsRng);
         let discovery: Vec<Box<dyn iroh::discovery::Discovery>> = vec![
             // FIXME: avoid this panic case.
@@ -54,6 +56,7 @@ impl Config {
         Self {
             secret_key,
             discovery,
+            alpn: alpn.to_vec(),
         }
     }
 
@@ -64,7 +67,7 @@ impl Config {
         let endpoint = Endpoint::builder()
             .secret_key(self.secret_key)
             .discovery(Box::new(discovery))
-            .alpns(vec![ALPN.to_vec()])
+            .alpns(vec![self.alpn.clone()])
             .bind()
             .await?;
         let discovery = endpoint.discovery().unwrap();
@@ -73,8 +76,12 @@ impl Config {
             Actor::spawn(None, PeerHubActor, endpoint.node_id()).await?;
 
         let mut tasks = JoinSet::new();
-        let new_peer_stream_subscriber =
-            NewPeerStreamSubscriber::new(peer_stream, peer_hub_actor.clone(), endpoint.clone());
+        let new_peer_stream_subscriber = NewPeerStreamSubscriber::new(
+            peer_stream,
+            peer_hub_actor.clone(),
+            endpoint.clone(),
+            &self.alpn,
+        );
         tasks.spawn(new_peer_stream_subscriber.run());
         let incoming_connection_listener =
             IncomingConnectionListener::new(endpoint, peer_hub_actor.clone());
@@ -136,7 +143,7 @@ mod tests {
     #[tokio::test]
     async fn connect_to_peers() {
         async fn query_peer_number() -> Result<usize> {
-            let config = Config::with_local_discovery();
+            let config = Config::with_local_discovery(b"connect_to_peers");
             let (peer_hub, _task_handle) = config.run().await?;
             // Wait for connection.
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -159,13 +166,15 @@ mod tests {
     async fn propagate_transactions() {
         // Receive transactions before timeout.
         let mut tasks = JoinSet::new();
+        let alpn = b"propagate_transactions";
         let txn1 = create_transaction();
         let txn2 = create_transaction();
         {
             let txn1 = txn1.clone();
             let txn2 = txn2.clone();
+            let alpn = *alpn;
             tasks.spawn(async move {
-                let config = Config::with_local_discovery();
+                let config = Config::with_local_discovery(&alpn);
                 let (peer_hub, _peer_hub_handle) = config.run().await?;
                 // Wait for connection.
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -181,7 +190,7 @@ mod tests {
             });
         }
         tasks.spawn(async move {
-            let config = Config::with_local_discovery();
+            let config = Config::with_local_discovery(alpn);
             let (peer_hub, _peer_hub_handle) = config.run().await?;
             // Wait for connection and transactions.
             tokio::time::sleep(Duration::from_secs(4)).await;

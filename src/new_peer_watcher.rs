@@ -9,14 +9,13 @@ use tracing::{info, warn};
 
 use crate::{peer::Peer, peerhub::PeerHubActorMessage};
 
-pub const ALPN: &[u8] = b"ddcoin/0.1";
-
 type BoxStream<T> = futures_lite::stream::Boxed<T>;
 
 pub struct NewPeerStreamSubscriber {
     stream: BoxStream<DiscoveryItem>,
     peer_hub: ActorRef<PeerHubActorMessage>,
     endpoint: Endpoint,
+    alpn: Vec<u8>,
 }
 
 impl NewPeerStreamSubscriber {
@@ -24,11 +23,13 @@ impl NewPeerStreamSubscriber {
         stream: BoxStream<DiscoveryItem>,
         peer_hub: ActorRef<PeerHubActorMessage>,
         endpoint: Endpoint,
+        alpn: &[u8],
     ) -> Self {
         Self {
             stream,
             peer_hub,
             endpoint,
+            alpn: alpn.to_vec(),
         }
     }
 
@@ -54,7 +55,7 @@ impl NewPeerStreamSubscriber {
                         continue;
                     }
 
-                    let conn = match self.endpoint.connect(item.node_addr, ALPN).await {
+                    let conn = match self.endpoint.connect(item.node_addr, &self.alpn).await {
                         Ok(conn) => conn,
                         Err(e) => {
                             warn!("Failed to connect to remote: {:?}", e);
