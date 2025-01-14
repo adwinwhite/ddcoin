@@ -122,6 +122,14 @@ mod tests {
         util::hex_to_bytes,
     };
 
+    fn random_alpn() -> Vec<u8> {
+        let mut alpn = vec![0; 8];
+        for byte in alpn.iter_mut() {
+            *byte = rand::random::<u8>();
+        }
+        alpn
+    }
+
     fn create_transaction() -> Transaction {
         const RECEIVER_PUB_KEY: &str =
             "01a4b29a7fc6127080b9eb962ec4f18a3a61d5e011cc3fa821d5d1d1f30d0ddb";
@@ -155,8 +163,8 @@ mod tests {
 
     #[tokio::test]
     async fn connect_to_peers() {
-        async fn query_peer_number() -> Result<usize> {
-            let config = Config::with_local_discovery(b"connect_to_peers");
+        async fn query_peer_number(alpn: Vec<u8>) -> Result<usize> {
+            let config = Config::with_local_discovery(&alpn);
             let (peer_hub, _task_handle) = config.run().await?;
             // Wait for connection.
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -165,10 +173,11 @@ mod tests {
             Ok(peers.len())
         }
         let mut tasks = JoinSet::new();
-        tasks.spawn(query_peer_number());
-        tasks.spawn(query_peer_number());
-        tasks.spawn(query_peer_number());
-        tasks.spawn(query_peer_number());
+        let alpn = random_alpn();
+        tasks.spawn(query_peer_number(alpn.clone()));
+        tasks.spawn(query_peer_number(alpn.clone()));
+        tasks.spawn(query_peer_number(alpn.clone()));
+        tasks.spawn(query_peer_number(alpn.clone()));
         while let Some(res) = tasks.join_next().await {
             let res = res.unwrap().unwrap();
             assert_eq!(res, 3);
@@ -179,13 +188,13 @@ mod tests {
     async fn propagate_transactions() {
         // Receive transactions before timeout.
         let mut tasks = JoinSet::new();
-        let alpn = b"propagate_transactions";
+        let alpn = random_alpn();
         let txn1 = create_transaction();
         let txn2 = create_transaction();
         {
             let txn1 = txn1.clone();
             let txn2 = txn2.clone();
-            let alpn = *alpn;
+            let alpn = alpn.clone();
             tasks.spawn(async move {
                 let config = Config::with_local_discovery(&alpn);
                 let (peer_hub, _peer_hub_handle) = config.run().await?;
@@ -203,7 +212,7 @@ mod tests {
             });
         }
         tasks.spawn(async move {
-            let config = Config::with_local_discovery(alpn);
+            let config = Config::with_local_discovery(&alpn);
             let (peer_hub, _peer_hub_handle) = config.run().await?;
             // Wait for connection and transactions.
             tokio::time::sleep(Duration::from_secs(4)).await;
@@ -228,13 +237,13 @@ mod tests {
     async fn propagate_blocks() {
         // Receive transactions before timeout.
         let mut tasks = JoinSet::new();
-        let alpn = b"propagate_blocks";
+        let alpn = random_alpn();
         let block1 = create_block(&Block::GENESIS);
         let block2 = create_block(&block1);
         {
             let block1 = block1.clone();
             let block2 = block2.clone();
-            let alpn = *alpn;
+            let alpn = alpn.clone();
             tasks.spawn(async move {
                 let config = Config::with_local_discovery(&alpn);
                 let (peer_hub, _peer_hub_handle) = config.run().await?;
@@ -254,7 +263,7 @@ mod tests {
             });
         }
         tasks.spawn(async move {
-            let config = Config::with_local_discovery(alpn);
+            let config = Config::with_local_discovery(&alpn);
             let (peer_hub, _peer_hub_handle) = config.run().await?;
             // Wait for connection and transactions.
             tokio::time::sleep(Duration::from_secs(5)).await;
