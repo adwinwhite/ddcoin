@@ -274,7 +274,7 @@ mod tests {
                 peer_hub.cast(PeerHubActorMessage::NewTransaction(txn2))?;
 
                 // Wait for transaction propagtion.
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tokio::time::sleep(Duration::from_secs(3)).await;
 
                 anyhow::Ok(())
             });
@@ -283,7 +283,7 @@ mod tests {
             let config = Config::with_local_discovery(&alpn);
             let (peer_hub, _peer_hub_handle) = config.run().await?;
             // Wait for connection and transactions.
-            tokio::time::sleep(Duration::from_secs(4)).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
 
             // Check if transactions are propagated.
             let recv_txn1 =
