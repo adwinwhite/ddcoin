@@ -119,6 +119,9 @@ mod tests {
 
     use crate::{
         Block, CoinAddress, Config, PeerHubActorMessage, Transaction, UnconfirmedBlock,
+        block::{BlockId, SequenceNo, Sha256Hash},
+        serdes::transport,
+        transaction::{Signature, TransactionId},
         util::hex_to_bytes,
     };
 
@@ -159,6 +162,71 @@ mod tests {
         };
 
         unconfirmed.try_confirm(&mut signing_key).unwrap()
+    }
+
+    fn create_invalid_transaction() -> Transaction {
+        #[allow(dead_code)]
+        struct TransactionInnerViewer {
+            id: TransactionId,
+            sender: CoinAddress,
+            receiver: CoinAddress,
+            amount: u64,
+            fee: u64,
+        }
+        #[allow(dead_code)]
+        struct TransactionViewer {
+            inner: TransactionInnerViewer,
+            signature: Signature,
+        }
+
+        let original_txn = create_transaction();
+        let mut txn_viewer: TransactionViewer = unsafe { std::mem::transmute(original_txn) };
+        // Malicious action here.
+        txn_viewer.inner.amount = txn_viewer.inner.amount.wrapping_add(1);
+        unsafe { std::mem::transmute(txn_viewer) }
+    }
+
+    fn create_invalid_block(prev_block: &Block) -> Block {
+        #[allow(dead_code)]
+        struct BlockInnerViewer {
+            sequence_no: SequenceNo,
+            id: BlockId,
+            prev_id: BlockId,
+            prev_sha256: Sha256Hash,
+            transactions: Vec<Transaction>,
+            miner: CoinAddress,
+            nonce: u64,
+        }
+        #[allow(dead_code)]
+        struct BlockViewer {
+            inner: BlockInnerViewer,
+            signature: Signature,
+        }
+        let block = create_block(prev_block);
+        let mut block_viewer: BlockViewer = unsafe { std::mem::transmute(block) };
+        // Malicious action here.
+        let mut csprng = rand::rngs::OsRng;
+        let signing_key = SigningKey::generate(&mut csprng);
+        let new_miner = signing_key.verifying_key().into();
+        block_viewer.inner.miner = new_miner;
+        unsafe { std::mem::transmute(block_viewer) }
+    }
+
+    #[test]
+    fn invalid_transaction() {
+        let bad_txn = create_invalid_transaction();
+        let bytes = transport::encode(&bad_txn).unwrap();
+        let received_txn: Result<Transaction> = transport::decode(&bytes);
+        assert!(received_txn.is_err());
+    }
+
+    #[test]
+    fn invalid_block() {
+        let prev_block = Block::GENESIS;
+        let bad_block = create_invalid_block(&prev_block);
+        let bytes = transport::encode(&bad_block).unwrap();
+        let received_block: Result<Block> = transport::decode(&bytes);
+        assert!(received_block.is_err());
     }
 
     #[tokio::test]
