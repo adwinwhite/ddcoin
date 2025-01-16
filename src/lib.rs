@@ -119,7 +119,7 @@ mod tests {
 
     use crate::{
         Block, CoinAddress, Config, PeerHubActorMessage, Transaction, UnconfirmedBlock,
-        block::{BlockId, SequenceNo, Sha256Hash},
+        block::{BlockId, NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS, SequenceNo, Sha256Hash},
         serdes::transport,
         transaction::{Signature, TransactionId},
         util::hex_to_bytes,
@@ -306,11 +306,18 @@ mod tests {
         // Receive transactions before timeout.
         let mut tasks = JoinSet::new();
         let alpn = random_alpn();
-        let block1 = create_block(&Block::GENESIS);
-        let block2 = create_block(&block1);
+        let mut blocks = Vec::with_capacity((NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS as usize) + 2);
+        for i in 0..blocks.capacity() {
+            let prev_block = if i == 0 {
+                &Block::GENESIS
+            } else {
+                &blocks[i - 1]
+            };
+            let block = create_block(prev_block);
+            blocks.push(block);
+        }
         {
-            let block1 = block1.clone();
-            let block2 = block2.clone();
+            let blocks = blocks.clone();
             let alpn = alpn.clone();
             tasks.spawn(async move {
                 let config = Config::with_local_discovery(&alpn);
@@ -320,9 +327,9 @@ mod tests {
                 tokio::time::sleep(Duration::from_secs(2)).await;
 
                 // Send blocks.
-                peer_hub.cast(PeerHubActorMessage::NewBlock(local_node_id, block1))?;
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                peer_hub.cast(PeerHubActorMessage::NewBlock(local_node_id, block2))?;
+                for block in blocks {
+                    peer_hub.cast(PeerHubActorMessage::NewBlock(local_node_id, block))?;
+                }
 
                 // Wait for transaction propagtion.
                 tokio::time::sleep(Duration::from_secs(3)).await;
@@ -336,13 +343,12 @@ mod tests {
             // Wait for connection and transactions.
             tokio::time::sleep(Duration::from_secs(5)).await;
 
-            // Check if transactions are propagated.
-            let recv_block1 =
-                ractor::call!(peer_hub, PeerHubActorMessage::QueryBlock, block1.id())?;
-            assert_eq!(recv_block1, Some(block1));
-            let recv_block2 =
-                ractor::call!(peer_hub, PeerHubActorMessage::QueryBlock, block2.id())?;
-            assert_eq!(recv_block2, Some(block2));
+            // Check if blocks are propagated.
+            for block in blocks {
+                let recv_block =
+                    ractor::call!(peer_hub, PeerHubActorMessage::QueryBlock, block.id())?;
+                assert_eq!(recv_block, Some(block));
+            }
 
             anyhow::Ok(())
         });

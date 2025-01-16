@@ -236,6 +236,8 @@ impl UnconfirmedBlock {
 
     // FIXME: should I keep this method here? Or move it to test util?
     pub fn find_nouce(&self) -> u64 {
+        let required_zeros = self.sequence_no / NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS + 1;
+
         let mut bytes = hashsig::encode(self).unwrap();
         let len = bytes.len();
         bytes.extend_from_slice(&[0; 8]);
@@ -244,7 +246,7 @@ impl UnconfirmedBlock {
             bytes[len..].copy_from_slice(&nouce.to_le_bytes()[..]);
             let hash = Sha256::digest(&bytes);
             let num_of_zeros = num_of_zeros_in_sha256(hash.as_ref());
-            if num_of_zeros >= 1 {
+            if (num_of_zeros as u64) >= required_zeros {
                 valid_nouce = nouce;
                 break;
             }
