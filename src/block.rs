@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter};
 
-use ed25519_dalek::{SigningKey, ed25519::signature::SignerMut};
+use ed25519_dalek::{SigningKey, Verifier, VerifyingKey, ed25519::signature::SignerMut};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -66,10 +66,52 @@ struct BlockInner {
     nonce: u64,
 }
 
+impl BlockInner {
+    fn verify_nonce(&self) -> bool {
+        // panic risk: How can this serialization fail?
+        let bytes = hashsig::encode(self).unwrap();
+        let hash = Sha256::digest(&bytes);
+        let num_of_zeros = num_of_zeros_in_sha256(hash.as_ref());
+        let required_zeros = self.sequence_no / NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS + 1;
+        (num_of_zeros as u64) >= required_zeros
+    }
+}
+
 #[derive(Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "BlockValidator")]
 pub struct Block {
     inner: BlockInner,
     signature: Signature,
+}
+
+// [serde validation trick here](https://github.com/serde-rs/serde-rs.github.io/pull/148/files).
+// Perhaps I should make a macro to duplicate the struct.
+#[derive(Deserialize)]
+struct BlockValidator {
+    inner: BlockInner,
+    signature: Signature,
+}
+
+impl std::convert::TryFrom<BlockValidator> for Block {
+    type Error = anyhow::Error;
+    fn try_from(value: BlockValidator) -> Result<Self, Self::Error> {
+        if !value.inner.verify_nonce() {
+            return Err(anyhow::anyhow!("Invalid nonce"));
+        }
+        let msg = crate::serdes::hashsig::encode(&value.inner).unwrap();
+        let verifying_key = VerifyingKey::from_bytes(&value.inner.miner.pub_key)?;
+        if let Ok(()) = verifying_key.verify(
+            &msg,
+            &ed25519_dalek::Signature::from_bytes(&value.signature.sig),
+        ) {
+            Ok(Block {
+                inner: value.inner,
+                signature: value.signature,
+            })
+        } else {
+            Err(anyhow::anyhow!("Invalid signature"))
+        }
+    }
 }
 
 impl Block {
