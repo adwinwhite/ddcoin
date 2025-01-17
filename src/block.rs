@@ -12,10 +12,6 @@ use crate::{
     util::{fmt_hex, hex_to_bytes, num_of_zeros_in_sha256},
 };
 
-pub const BLOCK_SIZE_LIMIT: usize = 20;
-// num_of_zeros = seq_no / THIS_CONST + 1;
-pub const NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS: u64 = 10;
-
 #[derive(Eq, PartialEq, Clone, Hash, Copy, Debug, Serialize, Deserialize)]
 pub struct BlockId {
     id: Uuid,
@@ -29,6 +25,15 @@ impl From<Uuid> for BlockId {
 
 impl BlockId {
     pub const GENESIS: BlockId = BlockId { id: Uuid::nil() };
+
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self { id: Uuid::new_v4() }
+    }
+
+    pub fn is_genesis(&self) -> bool {
+        *self == BlockId::GENESIS
+    }
 }
 
 pub type SequenceNo = u64;
@@ -72,7 +77,7 @@ impl BlockInner {
         let bytes = hashsig::encode(self).unwrap();
         let hash = Sha256::digest(&bytes);
         let num_of_zeros = num_of_zeros_in_sha256(hash.as_ref());
-        let required_zeros = self.sequence_no / NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS + 1;
+        let required_zeros = self.sequence_no / Block::NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS + 1;
         (num_of_zeros as u64) >= required_zeros
     }
 }
@@ -115,6 +120,11 @@ impl std::convert::TryFrom<BlockValidator> for Block {
 }
 
 impl Block {
+    pub const BLOCK_TXN_LIMIT: usize = 20;
+
+    // num_of_zeros = seq_no / THIS_CONST + 1;
+    pub const NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS: u64 = 10;
+
     pub const GENESIS: Block = Block {
         inner: BlockInner {
             sequence_no: 0,
@@ -137,6 +147,7 @@ impl Block {
             ),
         },
     };
+
     pub fn id(&self) -> BlockId {
         self.inner.id
     }
@@ -157,6 +168,10 @@ impl Block {
         let bytes = hashsig::encode(&self).unwrap();
         let array: [u8; 32] = Sha256::digest(&bytes).into();
         array.into()
+    }
+
+    pub fn transactions(&self) -> &[Transaction] {
+        &self.inner.transactions
     }
 }
 
@@ -184,12 +199,12 @@ impl Display for Block {
 
 #[derive(Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
 pub struct UnconfirmedBlock {
-    pub sequence_no: u64,
-    pub id: BlockId,
-    pub prev_id: BlockId,
-    pub prev_sha256: Sha256Hash,
-    pub transactions: Vec<Transaction>,
-    pub miner: CoinAddress,
+    sequence_no: u64,
+    id: BlockId,
+    prev_id: BlockId,
+    prev_sha256: Sha256Hash,
+    transactions: Vec<Transaction>,
+    miner: CoinAddress,
 }
 
 #[derive(Debug)]
@@ -199,7 +214,31 @@ pub enum BlockValidationError {
     InvalidNonce,
 }
 
+impl Display for BlockValidationError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BlockValidationError::BlockSizeExceeded => write!(f, "Block size exceeded"),
+            BlockValidationError::MinerNotMatchSigner => write!(f, "Miner not match signer"),
+            BlockValidationError::InvalidNonce => write!(f, "Invalid nonce"),
+        }
+    }
+}
+
+impl std::error::Error for BlockValidationError {}
+
+// TODO: eliminate the need of passing miner address and signer at different places.
 impl UnconfirmedBlock {
+    pub fn new(prev: &Block, miner: CoinAddress, txns: Vec<Transaction>) -> Self {
+        Self {
+            sequence_no: prev.seqno() + 1,
+            id: BlockId::new(),
+            prev_id: prev.id(),
+            prev_sha256: prev.sha256(),
+            transactions: txns,
+            miner,
+        }
+    }
+
     pub fn with_nonce(
         self,
         signing_key: &mut SigningKey,
@@ -214,7 +253,7 @@ impl UnconfirmedBlock {
             miner: self.miner,
             nonce,
         };
-        if inner.transactions.len() > BLOCK_SIZE_LIMIT {
+        if inner.transactions.len() > Block::BLOCK_TXN_LIMIT {
             return Err(BlockValidationError::BlockSizeExceeded);
         }
         if inner.miner != signing_key.verifying_key().into() {
@@ -224,7 +263,7 @@ impl UnconfirmedBlock {
         let bytes = hashsig::encode(&inner).unwrap();
         let hash = Sha256::digest(&bytes);
         let num_of_zeros = num_of_zeros_in_sha256(hash.as_ref());
-        let required_zeros = self.sequence_no / NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS + 1;
+        let required_zeros = self.sequence_no / Block::NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS + 1;
         if (num_of_zeros as u64) < required_zeros {
             return Err(BlockValidationError::InvalidNonce);
         }
@@ -236,7 +275,7 @@ impl UnconfirmedBlock {
 
     // FIXME: should I keep this method here? Or move it to test util?
     pub fn find_nouce(&self) -> u64 {
-        let required_zeros = self.sequence_no / NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS + 1;
+        let required_zeros = self.sequence_no / Block::NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS + 1;
 
         let mut bytes = hashsig::encode(self).unwrap();
         let len = bytes.len();

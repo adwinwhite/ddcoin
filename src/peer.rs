@@ -119,7 +119,7 @@ impl Peer {
                 }
                 PeerMessage::GetBlockResponse(node_id, block) => {
                     self.peer_hub
-                        .cast(PeerHubActorMessage::NewBlock(node_id, block))?;
+                        .cast(PeerHubActorMessage::NewBlock(Some(node_id), block))?;
                 }
             }
         }

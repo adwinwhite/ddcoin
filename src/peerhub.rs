@@ -1,6 +1,7 @@
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, HashSet, hash_map::Entry},
     fmt::Display,
+    ops::{Deref, DerefMut},
 };
 
 use anyhow::{Context, Result};
@@ -21,11 +22,56 @@ const PEER_SIZE_LIMIT: usize = 3;
 
 pub struct PeerHubActor;
 
+struct BlockMap {
+    map: HashMap<BlockId, Block>,
+}
+
+impl BlockMap {
+    // FIXME: prevent malicious actor sending cycles and causing infinite loop.
+    fn block_root(&self, block_id: &BlockId) -> BlockId {
+        let mut current_id = *block_id;
+        loop {
+            if current_id == BlockId::GENESIS {
+                return BlockId::GENESIS;
+            }
+            if let Some(block) = self.get(&current_id) {
+                current_id = block.prev_id();
+            } else {
+                return *block_id;
+            }
+        }
+    }
+
+    fn is_dangling(&self, block_id: &BlockId) -> bool {
+        !self.block_root(block_id).is_genesis()
+    }
+}
+
+impl Deref for BlockMap {
+    type Target = HashMap<BlockId, Block>;
+    fn deref(&self) -> &Self::Target {
+        &self.map
+    }
+}
+
+impl DerefMut for BlockMap {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.map
+    }
+}
+
+impl From<HashMap<BlockId, Block>> for BlockMap {
+    fn from(map: HashMap<BlockId, Block>) -> Self {
+        Self { map }
+    }
+}
+
 pub struct PeerHubActorState {
     peers: HashMap<NodeId, SendStream>,
     annoucements: HashMap<TransactionId, NodeId>,
     mempool: HashMap<TransactionId, Transaction>,
-    blocks: HashMap<BlockId, Block>,
+    blocks: BlockMap,
+    dangling_blocks: HashSet<BlockId>,
     leading_block: BlockId,
     leading_block_sequence_no: SequenceNo,
     local_node_id: NodeId,
@@ -39,7 +85,8 @@ impl PeerHubActorState {
             peers: HashMap::new(),
             annoucements: HashMap::new(),
             mempool: HashMap::new(),
-            blocks,
+            blocks: blocks.into(),
+            dangling_blocks: HashSet::new(),
             leading_block: BlockId::GENESIS,
             leading_block_sequence_no: 0,
             local_node_id,
@@ -78,21 +125,29 @@ impl PeerHubActorState {
         self.mempool.contains_key(txn_id) || self.annoucements.contains_key(txn_id)
     }
 
-    // FIXME: prevent malicious actor sending cycles and causing infinite loop.
-    fn block_root(&self, block_id: &BlockId) -> BlockId {
-        let mut current_id = *block_id;
-        loop {
-            if current_id == BlockId::GENESIS {
-                return BlockId::GENESIS;
-            }
-            if let Some(block) = self.blocks.get(&current_id) {
-                current_id = block.prev_id();
+    // TODO: remove duplicate check on chained blocks.
+    fn update_leading_block(&mut self) -> bool {
+        // Check through the dangling blocks to update leading block.
+        let leading_block = self
+            .dangling_blocks
+            .extract_if(|id| !self.blocks.is_dangling(id))
+            .map(|id| self.blocks.get(&id).unwrap())
+            .max_by_key(|block| block.seqno());
+
+        if let Some(new_leading_block) = leading_block {
+            if new_leading_block.seqno() > self.leading_block_sequence_no {
+                self.leading_block = new_leading_block.id();
+                self.leading_block_sequence_no = new_leading_block.seqno();
+                true
             } else {
-                return *block_id;
+                false
             }
+        } else {
+            false
         }
     }
 }
+type Amount = u64;
 
 // FIXME: optimize enum size here.
 #[allow(clippy::large_enum_variant)]
@@ -105,12 +160,15 @@ pub enum PeerHubActorMessage {
     GetTransaction(NodeId, TransactionId),
     GetBlock(NodeId, BlockId),
     NewTransaction(Transaction),
-    // We receives a new block from node.
-    NewBlock(NodeId, Block),
+    // We receives a new block from node or self.
+    NewBlock(Option<NodeId>, Block),
     QueryTransaction(TransactionId, RpcReplyPort<Option<Transaction>>),
+    QueryTransactions(Vec<TransactionId>, RpcReplyPort<Vec<Option<Transaction>>>),
     QueryBlock(BlockId, RpcReplyPort<Option<Block>>),
     QueryPeers(RpcReplyPort<Vec<NodeId>>),
     QueryLocalNodeId(RpcReplyPort<NodeId>),
+    QueryMemPool(RpcReplyPort<Vec<(TransactionId, Amount)>>),
+    QueryLeadingBlock(RpcReplyPort<BlockId>),
 }
 
 impl Display for PeerHubActorMessage {
@@ -139,14 +197,24 @@ impl Display for PeerHubActorMessage {
             PeerHubActorMessage::GetBlock(node_id, block_id) => {
                 write!(f, "GetBlock({}, {})", node_id, block_id)
             }
-            PeerHubActorMessage::NewBlock(node_id, block) => {
-                write!(f, "NewBlock({}, {})", node_id, block)
-            }
+            PeerHubActorMessage::NewBlock(node_id, block) => match node_id {
+                Some(node_id) => write!(f, "NewBlock({}, {})", node_id, block),
+                None => write!(f, "NewBlock(self, {})", block),
+            },
             PeerHubActorMessage::QueryBlock(block_id, _rpc_reply_port) => {
                 write!(f, "QueryBlock({})", block_id)
             }
             PeerHubActorMessage::QueryLocalNodeId(_) => {
                 write!(f, "QueryLocalNodeId")
+            }
+            PeerHubActorMessage::QueryMemPool(_) => {
+                write!(f, "QueryMemPool")
+            }
+            PeerHubActorMessage::QueryTransactions(ids, _reply) => {
+                write!(f, "QueryTransactions({:?})", ids)
+            }
+            PeerHubActorMessage::QueryLeadingBlock(_) => {
+                write!(f, "QueryLeadingBlock")
             }
         }
     }
@@ -257,20 +325,24 @@ impl Actor for PeerHubActor {
                 state.send_to_peer(&peer_msg, node_id).await?;
             }
             PeerHubActorMessage::NewBlock(node_id, block) => {
-                if block.seqno() <= state.leading_block_sequence_no {
-                    info!("We already have block of sequence no {}", block.seqno());
-                    return Ok(());
-                }
-
                 let block_id = block.id();
                 let block_prev_id = block.prev_id();
-                let seqno = block.seqno();
-                state.blocks.insert(block.id(), block);
+
+                // FIXME: remove this clone by changing order of execution.
+                state.blocks.insert(block.id(), block.clone());
+                state.dangling_blocks.insert(block_id);
                 // Follow valid block with highest seqno.
-                let local_root = state.block_root(&block_prev_id);
+                let local_root = state.blocks.block_root(&block_prev_id);
+                // This block can trace to genesis block thus is valid.
                 if local_root == BlockId::GENESIS {
-                    state.leading_block = block_id;
-                    state.leading_block_sequence_no = seqno;
+                    state.update_leading_block();
+                    state.mempool.retain(|txn_id, _| {
+                        !block
+                            .transactions()
+                            .iter()
+                            .map(|t| t.id())
+                            .any(|tid| &tid == txn_id)
+                    });
                     state
                         .broadcast(
                             state.local_node_id,
@@ -282,7 +354,7 @@ impl Actor for PeerHubActor {
                     // If the miner is ourself, we shouldn't have missing blocks thus won't execute
                     // below.
                     let peer_msg = PeerMessage::GetBlockRequest(local_root);
-                    state.send_to_peer(&peer_msg, node_id).await?;
+                    state.send_to_peer(&peer_msg, node_id.unwrap()).await?;
                 }
             }
             PeerHubActorMessage::QueryBlock(block_id, reply) => {
@@ -291,6 +363,24 @@ impl Actor for PeerHubActor {
             }
             PeerHubActorMessage::QueryLocalNodeId(reply) => {
                 reply.send(state.local_node_id)?;
+            }
+            PeerHubActorMessage::QueryMemPool(reply) => {
+                let amounts = state
+                    .mempool
+                    .iter()
+                    .map(|(txn_id, txn)| (*txn_id, txn.amount()))
+                    .collect::<Vec<_>>();
+                reply.send(amounts)?;
+            }
+            PeerHubActorMessage::QueryTransactions(ids, reply) => {
+                let txns = ids
+                    .iter()
+                    .map(|id| state.mempool.get(id).cloned())
+                    .collect::<Vec<_>>();
+                reply.send(txns)?;
+            }
+            PeerHubActorMessage::QueryLeadingBlock(reply) => {
+                reply.send(state.leading_block)?;
             }
         }
         Ok(())

@@ -1,5 +1,6 @@
 #![feature(never_type)]
 #![feature(array_try_from_fn)]
+#![feature(hash_extract_if)]
 
 mod block;
 mod new_peer_watcher;
@@ -115,11 +116,10 @@ mod tests {
     use anyhow::Result;
     use ed25519_dalek::SigningKey;
     use tokio::task::JoinSet;
-    use uuid::Uuid;
 
     use crate::{
         Block, CoinAddress, Config, PeerHubActorMessage, Transaction, UnconfirmedBlock,
-        block::{BlockId, NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS, SequenceNo, Sha256Hash},
+        block::{BlockId, SequenceNo, Sha256Hash},
         serdes::transport,
         transaction::{Signature, TransactionId},
         util::hex_to_bytes,
@@ -149,17 +149,10 @@ mod tests {
     fn create_block(prev_block: &Block) -> Block {
         let mut csprng = rand::rngs::OsRng;
         let mut signing_key = SigningKey::generate(&mut csprng);
-        let miner = signing_key.verifying_key().into();
+        let miner: CoinAddress = signing_key.verifying_key().into();
         let txn1 = create_transaction();
         let txn2 = create_transaction();
-        let unconfirmed = UnconfirmedBlock {
-            sequence_no: prev_block.seqno() + 1,
-            id: Uuid::new_v4().into(),
-            prev_id: prev_block.id(),
-            prev_sha256: prev_block.sha256(),
-            transactions: vec![txn1, txn2],
-            miner,
-        };
+        let unconfirmed = UnconfirmedBlock::new(prev_block, miner.clone(), vec![txn1, txn2]);
 
         unconfirmed.try_confirm(&mut signing_key).unwrap()
     }
@@ -306,7 +299,8 @@ mod tests {
         // Receive transactions before timeout.
         let mut tasks = JoinSet::new();
         let alpn = random_alpn();
-        let mut blocks = Vec::with_capacity((NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS as usize) + 2);
+        let mut blocks =
+            Vec::with_capacity((Block::NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS as usize) + 2);
         for i in 0..blocks.capacity() {
             let prev_block = if i == 0 {
                 &Block::GENESIS
@@ -322,13 +316,12 @@ mod tests {
             tasks.spawn(async move {
                 let config = Config::with_local_discovery(&alpn);
                 let (peer_hub, _peer_hub_handle) = config.run().await?;
-                let local_node_id = ractor::call!(peer_hub, PeerHubActorMessage::QueryLocalNodeId)?;
                 // Wait for connection.
                 tokio::time::sleep(Duration::from_secs(2)).await;
 
                 // Send blocks.
                 for block in blocks {
-                    peer_hub.cast(PeerHubActorMessage::NewBlock(local_node_id, block))?;
+                    peer_hub.cast(PeerHubActorMessage::NewBlock(None, block))?;
                 }
 
                 // Wait for transaction propagtion.
@@ -349,6 +342,78 @@ mod tests {
                     ractor::call!(peer_hub, PeerHubActorMessage::QueryBlock, block.id())?;
                 assert_eq!(recv_block, Some(block));
             }
+
+            anyhow::Ok(())
+        });
+        while let Some(res) = tasks.join_next().await {
+            let res = res.unwrap();
+            assert!(res.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn leading_block_with_forks() {
+        // Receive transactions before timeout.
+        let mut tasks = JoinSet::new();
+        let alpn = random_alpn();
+        let mut old_chain =
+            Vec::with_capacity((Block::NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS as usize) + 2);
+        for i in 0..old_chain.capacity() {
+            let prev_block = if i == 0 {
+                &Block::GENESIS
+            } else {
+                &old_chain[i - 1]
+            };
+            let block = create_block(prev_block);
+            old_chain.push(block);
+        }
+        let mut fork1 = old_chain[..old_chain.len() - 2].to_vec();
+        for _ in 0..5 {
+            let prev_block = fork1.last().unwrap();
+            let block = create_block(prev_block);
+            fork1.push(block);
+        }
+        let correct_leading_block = fork1.last().unwrap().id();
+        let mut fork2 = old_chain[..old_chain.len() - 2].to_vec();
+        for _ in 0..3 {
+            let prev_block = fork2.last().unwrap();
+            let block = create_block(prev_block);
+            fork2.push(block);
+        }
+        {
+            let alpn = alpn.clone();
+            tasks.spawn(async move {
+                let config = Config::with_local_discovery(&alpn);
+                let (peer_hub, _peer_hub_handle) = config.run().await?;
+                // Wait for connection.
+                tokio::time::sleep(Duration::from_secs(2)).await;
+
+                // Send old_chain.
+                for block in old_chain {
+                    peer_hub.cast(PeerHubActorMessage::NewBlock(None, block))?;
+                }
+                for block in fork1 {
+                    peer_hub.cast(PeerHubActorMessage::NewBlock(None, block))?;
+                }
+                for block in fork2 {
+                    peer_hub.cast(PeerHubActorMessage::NewBlock(None, block))?;
+                }
+
+                // Wait for transaction propagtion.
+                tokio::time::sleep(Duration::from_secs(3)).await;
+
+                anyhow::Ok(())
+            });
+        }
+        tasks.spawn(async move {
+            let config = Config::with_local_discovery(&alpn);
+            let (peer_hub, _peer_hub_handle) = config.run().await?;
+            // Wait for connection and transactions.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+
+            // Check if the leading block is correct.
+            let leading_id = ractor::call!(peer_hub, PeerHubActorMessage::QueryLeadingBlock)?;
+            assert_eq!(leading_id, correct_leading_block);
 
             anyhow::Ok(())
         });

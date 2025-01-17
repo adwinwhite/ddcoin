@@ -146,6 +146,10 @@ impl Transaction {
     pub fn id(&self) -> TransactionId {
         self.inner.id
     }
+
+    pub fn amount(&self) -> u64 {
+        self.inner.amount
+    }
 }
 
 impl Display for Transaction {
