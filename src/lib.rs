@@ -179,14 +179,14 @@ mod tests {
                 let config = Config::with_local_discovery(&alpn);
                 let (peer_hub, _peer_hub_handle) = config.run().await?;
                 // Wait for connection.
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tokio::time::sleep(Duration::from_secs(3)).await;
 
                 // Send two transactions.
                 peer_hub.cast(PeerHubActorMessage::NewTransaction(txn1))?;
                 peer_hub.cast(PeerHubActorMessage::NewTransaction(txn2))?;
 
                 // Wait for transaction propagtion.
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
 
                 anyhow::Ok(())
             });
@@ -208,6 +208,7 @@ mod tests {
             anyhow::Ok(())
         });
         while let Some(res) = tasks.join_next().await {
+            // FIXME: why join error? Panic. Why panic? Assertion failure.
             let res = res.unwrap();
             assert!(res.is_ok());
         }
@@ -236,7 +237,7 @@ mod tests {
                 let config = Config::with_local_discovery(&alpn);
                 let (peer_hub, _peer_hub_handle) = config.run().await?;
                 // Wait for connection.
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tokio::time::sleep(Duration::from_secs(3)).await;
 
                 // Send blocks.
                 for block in blocks {
@@ -253,7 +254,7 @@ mod tests {
             let config = Config::with_local_discovery(&alpn);
             let (peer_hub, _peer_hub_handle) = config.run().await?;
             // Wait for connection and transactions.
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(6)).await;
 
             // Check if blocks are propagated.
             for block in blocks {
@@ -305,7 +306,7 @@ mod tests {
                 let config = Config::with_local_discovery(&alpn);
                 let (peer_hub, _peer_hub_handle) = config.run().await?;
                 // Wait for connection.
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tokio::time::sleep(Duration::from_secs(3)).await;
 
                 // Send old_chain.
                 for block in old_chain {
@@ -328,7 +329,7 @@ mod tests {
             let config = Config::with_local_discovery(&alpn);
             let (peer_hub, _peer_hub_handle) = config.run().await?;
             // Wait for connection and transactions.
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(6)).await;
 
             // Check if the leading block is correct.
             let leading_id = ractor::call!(peer_hub, PeerHubActorMessage::QueryLeadingBlock)?;

@@ -154,7 +154,8 @@ type Amount = u64;
 #[derive(Debug)]
 pub enum PeerHubActorMessage {
     ShouldConnect(NodeId, RpcReplyPort<bool>),
-    NewPeer(NodeId, SendStream, RpcReplyPort<bool>),
+    // actively connect or accept.
+    NewPeer(NodeId, SendStream, bool, RpcReplyPort<bool>),
     AnnounceTransaction(NodeId, TransactionId),
     AnnounceBlock(NodeId, BlockId),
     GetTransaction(NodeId, TransactionId),
@@ -177,7 +178,7 @@ impl Display for PeerHubActorMessage {
             PeerHubActorMessage::ShouldConnect(node_id, _) => {
                 write!(f, "ShouldConnect({})", node_id)
             }
-            PeerHubActorMessage::NewPeer(node_id, _, _) => write!(f, "NewPeer({})", node_id),
+            PeerHubActorMessage::NewPeer(node_id, _, _, _) => write!(f, "NewPeer({})", node_id),
             PeerHubActorMessage::AnnounceTransaction(node_id, txn_id) => {
                 write!(f, "AnnounceTransaction({}, {})", node_id, txn_id)
             }
@@ -244,7 +245,10 @@ impl Actor for PeerHubActor {
             PeerHubActorMessage::ShouldConnect(node_id, reply_port) => {
                 if state.peers.len() >= PEER_SIZE_LIMIT {
                     reply_port.send(false)?;
-                    info!("Rejecting connection from {:?}", node_id);
+                    info!(
+                        "Has reached max peers, should not allow connection from {:?}",
+                        node_id
+                    );
                 } else {
                     let contains = state.peers.contains_key(&node_id);
                     let should_connect = !contains;
@@ -265,12 +269,29 @@ impl Actor for PeerHubActor {
                     state.send_to_peer(&peer_msg, node_id).await?;
                 }
             }
-            PeerHubActorMessage::NewPeer(node_id, send_stream, reply) => {
-                if let Entry::Vacant(e) = state.peers.entry(node_id) {
-                    e.insert(send_stream);
-                    reply.send(true)?;
-                } else {
+            PeerHubActorMessage::NewPeer(node_id, send_stream, connecting, reply) => {
+                if state.peers.len() >= PEER_SIZE_LIMIT {
                     reply.send(false)?;
+                    info!(
+                        "Has reached max peers, rejecting connection from {:?}",
+                        node_id
+                    );
+                    return Ok(());
+                }
+                match state.peers.entry(node_id) {
+                    Entry::Vacant(e) => {
+                        e.insert(send_stream);
+                        reply.send(true)?;
+                    }
+                    Entry::Occupied(mut e) => {
+                        // duplicate connection. smaller id should be actively connecting.
+                        if !((state.local_node_id < node_id) ^ connecting) {
+                            e.insert(send_stream);
+                            reply.send(true)?;
+                        } else {
+                            reply.send(false)?;
+                        }
+                    }
                 }
             }
             PeerHubActorMessage::NewTransaction(txn) => {

@@ -68,7 +68,7 @@ impl NewPeerStreamSubscriber {
                     tx.flush().await?;
 
                     let not_exist =
-                        ractor::call!(self.peer_hub, PeerHubActorMessage::NewPeer, node_id, tx)?;
+                        ractor::call!(self.peer_hub, PeerHubActorMessage::NewPeer, node_id, tx, true)?;
                     if not_exist {
                         let peer = Peer::new(rx, self.peer_hub.clone(), node_id);
                         tasks.spawn(peer.run());
@@ -115,14 +115,8 @@ impl IncomingConnectionListener {
                     rx.read_exact(&mut node_id_buf).await?;
                     let node_id = NodeId::from_bytes(&node_id_buf)?;
 
-                    let should_connect =
-                        ractor::call!(self.peer_hub, PeerHubActorMessage::ShouldConnect, node_id)?;
-                    if !should_connect {
-                        continue;
-                    }
-
                     let not_exist =
-                        ractor::call!(self.peer_hub, PeerHubActorMessage::NewPeer, node_id, tx)?;
+                        ractor::call!(self.peer_hub, PeerHubActorMessage::NewPeer, node_id, tx, false)?;
                     if not_exist {
                         let peer = Peer::new(rx, self.peer_hub.clone(), node_id);
                         tasks.spawn(peer.run());
