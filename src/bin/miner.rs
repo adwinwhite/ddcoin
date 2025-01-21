@@ -107,25 +107,14 @@ mod tests {
         });
         // Wait for block mining and propagation.
         tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-        let mut block_id = ractor::call!(peer_hub, ddcoin::PeerHubActorMessage::QueryLeadingBlock)?;
-        let mut blocks = Vec::new();
-        loop {
-            let block = ractor::call!(peer_hub, ddcoin::PeerHubActorMessage::QueryBlock, block_id)?
-                .unwrap();
-            println!("Block: {:?}", block);
-            let prev_block_id = block.prev_id();
-            block_id = prev_block_id;
-            blocks.push(block);
-            if prev_block_id.is_genesis() {
-                break;
-            }
-        }
-        for txn_id in txn_ids {
-            let found = blocks
-                .iter()
-                .any(|block| block.transactions().iter().any(|txn| txn.id() == txn_id));
-            assert!(found);
-        }
+        let depths = ractor::call!(
+            peer_hub,
+            ddcoin::PeerHubActorMessage::QueryTransactionDepths,
+            txn_ids
+        )?;
+        depths.into_iter().for_each(|depth| {
+            assert!(depth.is_some());
+        });
 
         Ok(())
     }

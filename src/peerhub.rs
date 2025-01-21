@@ -185,6 +185,28 @@ impl PeerHubActorState {
         }
     }
 
+    fn confirmed_chain(&self) -> Vec<&Block> {
+        let mut block_id = self.leading_block;
+        let mut blocks = Vec::new();
+        loop {
+            let block = self.blocks.get(&block_id).unwrap();
+            let prev_block_id = block.prev_id();
+            block_id = prev_block_id;
+            blocks.push(block);
+            if prev_block_id.is_genesis() {
+                break;
+            }
+        }
+        blocks
+    }
+
+    fn transaction_depth(chain: &Vec<&Block>, txn_id: &TransactionId) -> Option<u64> {
+        let found = chain
+            .iter()
+            .enumerate()
+            .find(|(_i, block)| block.transactions().iter().any(|txn| txn.id() == *txn_id));
+        found.map(|(i, _)| (chain.len() - 1 - i) as u64)
+    }
 }
 type Amount = u64;
 
@@ -204,6 +226,9 @@ pub enum PeerHubActorMessage {
     NewBlock(Option<NodeId>, Block),
     QueryTransaction(TransactionId, RpcReplyPort<Option<Transaction>>),
     QueryTransactions(Vec<TransactionId>, RpcReplyPort<Vec<Option<Transaction>>>),
+    // How many confirmed blocks after the one containing this transaction.
+    QueryTransactionDepth(TransactionId, RpcReplyPort<Option<u64>>),
+    QueryTransactionDepths(Vec<TransactionId>, RpcReplyPort<Vec<Option<u64>>>),
     QueryBlock(BlockId, RpcReplyPort<Option<Block>>),
     QueryPeers(RpcReplyPort<Vec<NodeId>>),
     QueryLocalNodeId(RpcReplyPort<NodeId>),
@@ -251,10 +276,24 @@ impl Display for PeerHubActorMessage {
                 write!(f, "QueryMemPool")
             }
             PeerHubActorMessage::QueryTransactions(ids, _reply) => {
-                write!(f, "QueryTransactions({:?})", ids)
+                write!(f, "QueryTransactions([")?;
+                for id in ids {
+                    write!(f, "{}, ", id)?;
+                }
+                write!(f, "])")
             }
             PeerHubActorMessage::QueryLeadingBlock(_) => {
                 write!(f, "QueryLeadingBlock")
+            }
+            PeerHubActorMessage::QueryTransactionDepth(txn_id, _reply) => {
+                write!(f, "QueryTransactionDepth({})", txn_id)
+            }
+            PeerHubActorMessage::QueryTransactionDepths(ids, _) => {
+                write!(f, "QueryTransactionDepths([")?;
+                for id in ids {
+                    write!(f, "{}, ", id)?;
+                }
+                write!(f, "])")
             }
         }
     }
@@ -452,6 +491,19 @@ impl Actor for PeerHubActor {
             }
             PeerHubActorMessage::QueryLeadingBlock(reply) => {
                 reply.send(state.leading_block)?;
+            }
+            PeerHubActorMessage::QueryTransactionDepth(txn_id, reply) => {
+                let chain = state.confirmed_chain();
+                let depth = PeerHubActorState::transaction_depth(&chain, &txn_id);
+                reply.send(depth)?;
+            }
+            PeerHubActorMessage::QueryTransactionDepths(ids, reply) => {
+                let chain = state.confirmed_chain();
+                let depths = ids
+                    .iter()
+                    .map(|id| PeerHubActorState::transaction_depth(&chain, id))
+                    .collect::<Vec<_>>();
+                reply.send(depths)?;
             }
         }
         Ok(())
