@@ -2,13 +2,14 @@ use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
     fmt::Display,
     ops::{Deref, DerefMut},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
 use iroh::{NodeId, endpoint::SendStream};
 use ractor::{Actor, RpcReplyPort};
 use tokio::io::AsyncWriteExt;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     Block,
@@ -68,6 +69,7 @@ impl From<HashMap<BlockId, Block>> for BlockMap {
 
 pub struct PeerHubActorState {
     peers: HashMap<NodeId, SendStream>,
+    // FIXME: Do we still need this?
     annoucements: HashMap<TransactionId, NodeId>,
     mempool: HashMap<TransactionId, Transaction>,
     blocks: BlockMap,
@@ -125,8 +127,18 @@ impl PeerHubActorState {
         self.mempool.contains_key(txn_id) || self.annoucements.contains_key(txn_id)
     }
 
+    // TODO: wipe out blocks that based on invalid blocks.
     // TODO: remove duplicate check on chained blocks.
     fn update_leading_block(&mut self) -> bool {
+        // Wipe out blocks that have invalid timestamp.
+        self.dangling_blocks.retain(|id| {
+            let block = self.blocks.get(id).unwrap();
+            if let Some(prev_block) = self.blocks.get(&block.prev_id()) {
+                prev_block.timestamp() < block.timestamp()
+            } else {
+                true
+            }
+        });
         // Check through the dangling blocks to update leading block.
         let leading_block = self
             .dangling_blocks
@@ -346,6 +358,15 @@ impl Actor for PeerHubActor {
                 state.send_to_peer(&peer_msg, node_id).await?;
             }
             PeerHubActorMessage::NewBlock(node_id, block) => {
+                let current = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap(/*now is certainly later than epoch*/)
+                    .as_nanos();
+                if block.timestamp() > current {
+                    warn!("Block {} has invalid timestamp", block.id());
+                    return Ok(());
+                }
+
                 let block_id = block.id();
                 let block_prev_id = block.prev_id();
 

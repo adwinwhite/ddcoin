@@ -2,7 +2,7 @@ use ed25519_dalek::SigningKey;
 
 use crate::{
     Block, CoinAddress, Transaction, UnconfirmedBlock,
-    block::{BlockId, SequenceNo, Sha256Hash},
+    block::{BlockId, SequenceNo, Sha256Hash, Timestamp},
     transaction::{Signature, TransactionId},
     util::hex_to_bytes,
 };
@@ -75,6 +75,7 @@ pub fn create_invalid_block(prev_block: &Block) -> Block {
     #[allow(dead_code)]
     struct BlockViewer {
         inner: BlockInnerViewer,
+        timestamp: Timestamp,
         signature: Signature,
     }
     let block = create_block(prev_block);

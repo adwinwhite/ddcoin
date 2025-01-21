@@ -24,6 +24,7 @@
             (rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
               extensions = [ "rust-src" "rust-analyzer" ];
             }))           
+            cargo-nextest
             # lldb
           ];
 
