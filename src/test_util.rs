@@ -2,7 +2,7 @@ use ed25519_dalek::SigningKey;
 
 use crate::{
     Block, CoinAddress, Transaction, UnconfirmedBlock,
-    block::{BlockId, SequenceNo, Sha256Hash, Timestamp},
+    block::{BlockId, SequenceNo, Timestamp},
     transaction::{Signature, TransactionId},
     util::hex_to_bytes,
 };
@@ -35,7 +35,6 @@ pub fn create_block(prev_block: &Block) -> Block {
     let txn1 = create_transaction();
     let txn2 = create_transaction();
     let unconfirmed = UnconfirmedBlock::new(prev_block, miner.clone(), vec![txn1, txn2]);
-
     unconfirmed.try_confirm(&mut signing_key).unwrap()
 }
 
@@ -60,24 +59,20 @@ pub fn create_invalid_transaction() -> Transaction {
     txn_viewer.inner.amount = txn_viewer.inner.amount.wrapping_add(1);
     unsafe { std::mem::transmute(txn_viewer) }
 }
+pub struct BlockInnerViewer {
+    pub sequence_no: SequenceNo,
+    pub prev_id: BlockId,
+    pub transactions: Vec<Transaction>,
+    pub miner: CoinAddress,
+    pub nonce: u64,
+}
+pub struct BlockViewer {
+    pub inner: BlockInnerViewer,
+    pub timestamp: Timestamp,
+    pub signature: Signature,
+}
 
 pub fn create_invalid_block(prev_block: &Block) -> Block {
-    #[allow(dead_code)]
-    struct BlockInnerViewer {
-        sequence_no: SequenceNo,
-        id: BlockId,
-        prev_id: BlockId,
-        prev_sha256: Sha256Hash,
-        transactions: Vec<Transaction>,
-        miner: CoinAddress,
-        nonce: u64,
-    }
-    #[allow(dead_code)]
-    struct BlockViewer {
-        inner: BlockInnerViewer,
-        timestamp: Timestamp,
-        signature: Signature,
-    }
     let block = create_block(prev_block);
     let mut block_viewer: BlockViewer = unsafe { std::mem::transmute(block) };
     // Malicious action here.

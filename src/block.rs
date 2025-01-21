@@ -6,7 +6,6 @@ use std::{
 use ed25519_dalek::{SigningKey, Verifier, VerifyingKey, ed25519::signature::SignerMut};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
 
 use crate::{
     CoinAddress, Transaction,
@@ -15,27 +14,12 @@ use crate::{
     util::{fmt_hex, hex_to_bytes, num_of_zeros_in_sha256},
 };
 
-#[derive(Eq, PartialEq, Clone, Hash, Copy, Debug, Serialize, Deserialize)]
-pub struct BlockId {
-    id: Uuid,
-}
-
-impl From<Uuid> for BlockId {
-    fn from(id: Uuid) -> Self {
-        Self { id }
-    }
-}
+pub type BlockId = Sha256Hash;
 
 impl BlockId {
-    pub const GENESIS: BlockId = BlockId { id: Uuid::nil() };
-
-    #[allow(clippy::new_without_default)]
-    pub fn new() -> Self {
-        Self { id: Uuid::new_v4() }
-    }
-
+    // TODO: store genesis_id as a constant to avoid runtime computation.
     pub fn is_genesis(&self) -> bool {
-        *self == BlockId::GENESIS
+        *self == Block::GENESIS.id()
     }
 }
 
@@ -45,7 +29,7 @@ pub type SequenceNo = u64;
 // TODO: consider a more approriate type. u128 doesn't port well to other languages?
 pub type Timestamp = u128;
 
-#[derive(Eq, PartialEq, Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Eq, PartialEq, Clone, Copy, Hash, Debug, Serialize, Deserialize)]
 pub struct Sha256Hash([u8; 32]);
 
 impl Display for Sha256Hash {
@@ -60,19 +44,11 @@ impl From<[u8; 32]> for Sha256Hash {
     }
 }
 
-impl Display for BlockId {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.id)
-    }
-}
-
 // FIXME: fixate the serialize order and layout.
 #[derive(Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
 struct BlockInner {
     sequence_no: SequenceNo,
-    id: BlockId,
     prev_id: BlockId,
-    prev_sha256: Sha256Hash,
     transactions: Vec<Transaction>,
     miner: CoinAddress,
     nonce: u64,
@@ -97,9 +73,12 @@ pub struct Block {
     signature: Signature,
 }
 
+// TODO: Enforce more validation at construction.
 // Note: require further validation.
 // 0. can this block trace back to genesis?
-// 1. is timestamp greater than previous block's?
+// 1. is timestamp greater than previous block's and smaller than received time?
+// 2. does previous block's hash match? Yes, we use content addressing now.
+// 3. does previous block's seqno match?
 // [serde validation trick here](https://github.com/serde-rs/serde-rs.github.io/pull/148/files).
 // Perhaps I should make a macro to duplicate the struct.
 #[derive(Deserialize)]
@@ -142,11 +121,7 @@ impl Block {
     pub const GENESIS: Block = Block {
         inner: BlockInner {
             sequence_no: 0,
-            id: BlockId::GENESIS,
-            prev_id: BlockId::GENESIS,
-            prev_sha256: Sha256Hash(hex_to_bytes(
-                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            )),
+            prev_id: Sha256Hash([0; 32]),
             transactions: Vec::new(),
             miner: CoinAddress {
                 pub_key: hex_to_bytes(
@@ -164,7 +139,7 @@ impl Block {
     };
 
     pub fn id(&self) -> BlockId {
-        self.inner.id
+        self.sha256()
     }
 
     pub fn prev_id(&self) -> BlockId {
@@ -173,10 +148,6 @@ impl Block {
 
     pub fn seqno(&self) -> SequenceNo {
         self.inner.sequence_no
-    }
-
-    pub fn prev_sha256(&self) -> Sha256Hash {
-        self.inner.prev_sha256
     }
 
     pub fn sha256(&self) -> Sha256Hash {
@@ -199,13 +170,11 @@ impl Display for Block {
             f,
             "Block: seqno: {}, id: {}, prev_id: {}, miner: {}, nouce: {}, ",
             self.inner.sequence_no,
-            self.inner.id,
+            self.id(),
             self.inner.prev_id,
             self.inner.miner,
             self.inner.nonce
         )?;
-        write!(f, "prev_sha256: ")?;
-        fmt_hex(&self.inner.prev_sha256.0, f)?;
         write!(f, ", transactions: ")?;
         write!(f, "[")?;
         for txn in &self.inner.transactions {
@@ -218,9 +187,7 @@ impl Display for Block {
 #[derive(Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
 pub struct UnconfirmedBlock {
     sequence_no: u64,
-    id: BlockId,
     prev_id: BlockId,
-    prev_sha256: Sha256Hash,
     transactions: Vec<Transaction>,
     miner: CoinAddress,
 }
@@ -249,9 +216,7 @@ impl UnconfirmedBlock {
     pub fn new(prev: &Block, miner: CoinAddress, txns: Vec<Transaction>) -> Self {
         Self {
             sequence_no: prev.seqno() + 1,
-            id: BlockId::new(),
             prev_id: prev.id(),
-            prev_sha256: prev.sha256(),
             transactions: txns,
             miner,
         }
@@ -264,9 +229,7 @@ impl UnconfirmedBlock {
     ) -> Result<Block, BlockValidationError> {
         let inner = BlockInner {
             sequence_no: self.sequence_no,
-            id: self.id,
             prev_id: self.prev_id,
-            prev_sha256: self.prev_sha256,
             transactions: self.transactions,
             miner: self.miner,
             nonce,
@@ -330,9 +293,8 @@ impl UnconfirmedBlock {
 #[cfg(test)]
 mod tests {
     use ed25519_dalek::SigningKey;
-    use sha2::{Digest, Sha256};
 
-    use crate::{UnconfirmedBlock, block::BlockId};
+    use crate::{UnconfirmedBlock, block::Sha256Hash};
 
     #[test]
     fn generate_genesis_block() {
@@ -341,16 +303,13 @@ mod tests {
         let miner = signing_key.verifying_key().into();
         let unconfirmed = UnconfirmedBlock {
             sequence_no: 0,
-            id: BlockId::GENESIS,
-            prev_id: BlockId::GENESIS,
-            prev_sha256: std::convert::Into::<[u8; 32]>::into(Sha256::digest([])).into(),
+            prev_id: Sha256Hash([0; 32]),
             transactions: Vec::new(),
             miner,
         };
 
         let genesis_block = unconfirmed.try_confirm(&mut signing_key).unwrap();
         println!("Genesis block: {}", genesis_block);
-        println!("PrevSha256: {}", genesis_block.inner.prev_sha256);
         println!("Miner: {}", genesis_block.inner.miner);
         println!("Signature: {}", genesis_block.signature);
     }

@@ -9,7 +9,8 @@ mod peerhub;
 mod serdes;
 mod transaction;
 mod util;
-// TODO: gate behind a feature.
+
+#[cfg(feature = "test_util")]
 pub mod test_util;
 
 use tracing::error;
@@ -111,6 +112,7 @@ pub async fn run() -> Result<(ActorRef<PeerHubActorMessage>, JoinHandle<()>)> {
     Config::default().run().await
 }
 
+#[cfg(feature = "test_util")]
 #[cfg(test)]
 mod tests {
     use std::time::Duration;

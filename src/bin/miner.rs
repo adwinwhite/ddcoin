@@ -68,6 +68,7 @@ async fn main() -> Result<!> {
     miner_config.run().await
 }
 
+#[cfg(feature = "test_util")]
 #[cfg(test)]
 mod tests {
     use anyhow::Result;

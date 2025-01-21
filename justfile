@@ -2,6 +2,9 @@
 hello: 
   echo "Just hello!"
 
+test:
+  cargo test --features test_util
+
 build:
   cargo build
 

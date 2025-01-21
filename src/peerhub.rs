@@ -32,8 +32,8 @@ impl BlockMap {
     fn block_root(&self, block_id: &BlockId) -> BlockId {
         let mut current_id = *block_id;
         loop {
-            if current_id == BlockId::GENESIS {
-                return BlockId::GENESIS;
+            if current_id.is_genesis() {
+                return Block::GENESIS.id();
             }
             if let Some(block) = self.get(&current_id) {
                 current_id = block.prev_id();
@@ -73,6 +73,8 @@ pub struct PeerHubActorState {
     annoucements: HashMap<TransactionId, NodeId>,
     mempool: HashMap<TransactionId, Transaction>,
     blocks: BlockMap,
+    // TODO: Maybe use smallvec.
+    next_blocks: HashMap<BlockId, HashSet<BlockId>>,
     dangling_blocks: HashSet<BlockId>,
     leading_block: BlockId,
     leading_block_sequence_no: SequenceNo,
@@ -82,14 +84,15 @@ pub struct PeerHubActorState {
 impl PeerHubActorState {
     pub fn new(local_node_id: NodeId) -> Self {
         let mut blocks = HashMap::new();
-        blocks.insert(BlockId::GENESIS, Block::GENESIS);
+        blocks.insert(Block::GENESIS.id(), Block::GENESIS);
         Self {
             peers: HashMap::new(),
             annoucements: HashMap::new(),
             mempool: HashMap::new(),
             blocks: blocks.into(),
+            next_blocks: HashMap::new(),
             dangling_blocks: HashSet::new(),
-            leading_block: BlockId::GENESIS,
+            leading_block: Block::GENESIS.id(),
             leading_block_sequence_no: 0,
             local_node_id,
         }
@@ -130,15 +133,6 @@ impl PeerHubActorState {
     // TODO: wipe out blocks that based on invalid blocks.
     // TODO: remove duplicate check on chained blocks.
     fn update_leading_block(&mut self) -> bool {
-        // Wipe out blocks that have invalid timestamp.
-        self.dangling_blocks.retain(|id| {
-            let block = self.blocks.get(id).unwrap();
-            if let Some(prev_block) = self.blocks.get(&block.prev_id()) {
-                prev_block.timestamp() < block.timestamp()
-            } else {
-                true
-            }
-        });
         // Check through the dangling blocks to update leading block.
         let leading_block = self
             .dangling_blocks
@@ -158,6 +152,39 @@ impl PeerHubActorState {
             false
         }
     }
+
+    fn update_next_blocks(&mut self, block: &Block) {
+        let block_id = block.id();
+        let block_prev_id = block.prev_id();
+        match self.next_blocks.entry(block_prev_id) {
+            Entry::Vacant(e) => {
+                let mut set = HashSet::new();
+                set.insert(block_id);
+                e.insert(set);
+            }
+            Entry::Occupied(mut e) => {
+                e.get_mut().insert(block_id);
+            }
+        }
+
+        let next_blocks = &*self.next_blocks.entry(block_id).or_default();
+        for n_id in next_blocks {
+            if !self.dangling_blocks.contains(n_id) {
+                continue;
+            }
+            // Check time.
+            let next_block = self.blocks.get(n_id).unwrap();
+            if next_block.timestamp() < block.timestamp() || block.seqno() + 1 != next_block.seqno()
+            {
+                warn!(
+                    "Block {} has invalid timestamp or sha256 hash or seqno",
+                    n_id
+                );
+                self.dangling_blocks.remove(n_id);
+            }
+        }
+    }
+
 }
 type Amount = u64;
 
@@ -370,13 +397,15 @@ impl Actor for PeerHubActor {
                 let block_id = block.id();
                 let block_prev_id = block.prev_id();
 
-                // FIXME: remove this clone by changing order of execution.
+                state.update_next_blocks(&block);
+
+                // TODO: remove this clone by changing order of execution.
                 state.blocks.insert(block.id(), block.clone());
                 state.dangling_blocks.insert(block_id);
                 // Follow valid block with highest seqno.
                 let local_root = state.blocks.block_root(&block_prev_id);
                 // This block can trace to genesis block thus is valid.
-                if local_root == BlockId::GENESIS {
+                if local_root.is_genesis() {
                     state.update_leading_block();
                     state.mempool.retain(|txn_id, _| {
                         !block
