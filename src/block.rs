@@ -51,6 +51,7 @@ struct BlockInner {
     prev_id: BlockId,
     transactions: Vec<Transaction>,
     miner: CoinAddress,
+    timestamp: Timestamp,
     nonce: u64,
 }
 
@@ -69,7 +70,6 @@ impl BlockInner {
 #[serde(try_from = "BlockValidator")]
 pub struct Block {
     inner: BlockInner,
-    timestamp: Timestamp,
     signature: Signature,
 }
 
@@ -84,7 +84,6 @@ pub struct Block {
 #[derive(Deserialize)]
 struct BlockValidator {
     inner: BlockInner,
-    timestamp: Timestamp,
     signature: Signature,
 }
 
@@ -94,8 +93,7 @@ impl std::convert::TryFrom<BlockValidator> for Block {
         if !value.inner.verify_nonce() {
             return Err(anyhow::anyhow!("Invalid nonce"));
         }
-        let mut msg = crate::serdes::hashsig::encode(&value.inner).unwrap();
-        msg.extend_from_slice(&value.timestamp.to_le_bytes());
+        let msg = crate::serdes::hashsig::encode(&value.inner).unwrap();
         let verifying_key = VerifyingKey::from_bytes(&value.inner.miner.pub_key)?;
         if let Ok(()) = verifying_key.verify(
             &msg,
@@ -103,7 +101,6 @@ impl std::convert::TryFrom<BlockValidator> for Block {
         ) {
             Ok(Block {
                 inner: value.inner,
-                timestamp: value.timestamp,
                 signature: value.signature,
             })
         } else {
@@ -128,9 +125,9 @@ impl Block {
                     "3acee5b5591717dfbb2f773823e916d01e586de6695bb07b9665428cf88df30d",
                 ),
             },
+            timestamp: Duration::from_secs(1737430342).as_nanos(),
             nonce: 0,
         },
-        timestamp: Duration::from_secs(1737430342).as_nanos(),
         signature: Signature {
             sig: hex_to_bytes(
                 "e55aa435764adddf0eb9ea47f3836caf0a12d8d12c05e552a15d3cf5f1469c6adc90d16db5654983f1580caad1304ef67874a4e85682c91cb47aa1db82898701",
@@ -160,7 +157,7 @@ impl Block {
         &self.inner.transactions
     }
     pub fn timestamp(&self) -> Timestamp {
-        self.timestamp
+        self.inner.timestamp
     }
 }
 
@@ -190,6 +187,7 @@ pub struct UnconfirmedBlock {
     prev_id: BlockId,
     transactions: Vec<Transaction>,
     miner: CoinAddress,
+    timestamp: Timestamp,
 }
 
 #[derive(Debug)]
@@ -219,6 +217,10 @@ impl UnconfirmedBlock {
             prev_id: prev.id(),
             transactions: txns,
             miner,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap(/* can't be ealier than epoch */)
+                .as_nanos(),
         }
     }
 
@@ -232,6 +234,7 @@ impl UnconfirmedBlock {
             prev_id: self.prev_id,
             transactions: self.transactions,
             miner: self.miner,
+            timestamp: self.timestamp,
             nonce,
         };
         if inner.transactions.len() > Block::BLOCK_TXN_LIMIT {
@@ -241,25 +244,16 @@ impl UnconfirmedBlock {
             return Err(BlockValidationError::MinerNotMatchSigner);
         }
         // panic risk: How can this serialization fail?
-        let mut bytes = hashsig::encode(&inner).unwrap();
+        let bytes = hashsig::encode(&inner).unwrap();
         let hash = Sha256::digest(&bytes);
         let num_of_zeros = num_of_zeros_in_sha256(hash.as_ref());
         let required_zeros = self.sequence_no / Block::NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS + 1;
         if (num_of_zeros as u64) < required_zeros {
             return Err(BlockValidationError::InvalidNonce);
         }
-        let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap(/* can't be ealier than epoch */)
-                .as_nanos();
-        bytes.extend_from_slice(&timestamp.to_le_bytes());
 
         let signature = signing_key.sign(&bytes).into();
-        let block = Block {
-            inner,
-            timestamp,
-            signature,
-        };
+        let block = Block { inner, signature };
         Ok(block)
     }
 
@@ -306,6 +300,10 @@ mod tests {
             prev_id: Sha256Hash([0; 32]),
             transactions: Vec::new(),
             miner,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
         };
 
         let genesis_block = unconfirmed.try_confirm(&mut signing_key).unwrap();

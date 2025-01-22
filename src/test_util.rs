@@ -64,11 +64,11 @@ pub struct BlockInnerViewer {
     pub prev_id: BlockId,
     pub transactions: Vec<Transaction>,
     pub miner: CoinAddress,
+    pub timestamp: Timestamp,
     pub nonce: u64,
 }
 pub struct BlockViewer {
     pub inner: BlockInnerViewer,
-    pub timestamp: Timestamp,
     pub signature: Signature,
 }
 
