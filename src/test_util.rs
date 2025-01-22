@@ -2,9 +2,9 @@ use ed25519_dalek::SigningKey;
 
 use crate::{
     Block, CoinAddress, Transaction, UnconfirmedBlock,
-    block::{BlockId, SequenceNo, Timestamp},
-    transaction::{Signature, TransactionId},
-    util::hex_to_bytes,
+    block::{BlockId, SequenceNo},
+    transaction::Signature,
+    util::{Timestamp, hex_to_bytes},
 };
 
 pub fn random_alpn() -> Vec<u8> {
@@ -41,11 +41,11 @@ pub fn create_block(prev_block: &Block) -> Block {
 pub fn create_invalid_transaction() -> Transaction {
     #[allow(dead_code)]
     struct TransactionInnerViewer {
-        id: TransactionId,
         sender: CoinAddress,
         receiver: CoinAddress,
         amount: u64,
         fee: u64,
+        timestamp: Timestamp,
     }
     #[allow(dead_code)]
     struct TransactionViewer {

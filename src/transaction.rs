@@ -3,19 +3,14 @@ use std::{fmt::Display, hash::Hash};
 use ed25519_dalek::{Verifier, VerifyingKey, ed25519::signature::SignerMut};
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
-use uuid::Uuid;
+use sha2::{Digest, Sha256};
 
-#[derive(Eq, PartialEq, Hash, Clone, Copy, Debug, Serialize, Deserialize)]
-pub struct TransactionId {
-    #[serde(with = "uuid::serde::compact")]
-    id: Uuid,
-}
+use crate::{
+    serdes::hashsig,
+    util::{Sha256Hash, Timestamp, TimestampExt},
+};
 
-impl Display for TransactionId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.id)
-    }
-}
+pub type TransactionId = Sha256Hash;
 
 #[derive(Eq, PartialEq, Hash, Clone, Debug, Serialize, Deserialize)]
 pub struct CoinAddress {
@@ -76,11 +71,11 @@ impl Display for Signature {
 
 #[derive(Eq, PartialEq, Hash, Clone, Debug, Serialize, Deserialize)]
 struct TransactionInner {
-    id: TransactionId,
     sender: CoinAddress,
     receiver: CoinAddress,
     amount: u64,
     fee: u64,
+    timestamp: Timestamp,
 }
 
 #[derive(Eq, PartialEq, Hash, Clone, Debug, Serialize, Deserialize)]
@@ -124,16 +119,15 @@ impl Transaction {
         amount: u64,
         fee: u64,
     ) -> Self {
-        let id = Uuid::new_v4();
         let sender = CoinAddress {
             pub_key: signing_key.verifying_key().to_bytes(),
         };
         let inner = TransactionInner {
-            id: TransactionId { id },
             sender,
             receiver,
             amount,
             fee,
+            timestamp: Timestamp::now(),
         };
         let msg = crate::serdes::hashsig::encode(&inner).unwrap();
         let signature = signing_key.sign(&msg);
@@ -144,7 +138,9 @@ impl Transaction {
     }
 
     pub fn id(&self) -> TransactionId {
-        self.inner.id
+        let bytes = hashsig::encode(&self).unwrap();
+        let array: [u8; 32] = Sha256::digest(&bytes).into();
+        array.into()
     }
 
     pub fn amount(&self) -> u64 {
@@ -157,7 +153,7 @@ impl Display for Transaction {
         write!(
             f,
             "Transaction: id: {}, sender: {}, receiver: {}, amount: {}, fee: {}",
-            self.inner.id,
+            self.id(),
             self.inner.sender,
             self.inner.receiver,
             self.inner.amount,

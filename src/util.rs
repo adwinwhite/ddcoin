@@ -1,3 +1,7 @@
+use std::fmt::{Display, Formatter};
+
+use serde::{Deserialize, Serialize};
+
 pub(crate) const fn hex_to_bytes<const N: usize>(s: &str) -> [u8; N] {
     const fn ascii_to_num(c: u8) -> u8 {
         match c {
@@ -50,4 +54,34 @@ pub(crate) fn fmt_hex(bytes: &[u8], f: &mut std::fmt::Formatter<'_>) -> std::fmt
         write!(f, "{:02x}", b)?;
     }
     Ok(())
+}
+
+// nanoseconds.
+// TODO: consider a more approriate type. u128 doesn't port well to other languages?
+pub trait TimestampExt {
+    fn now() -> Self;
+}
+pub type Timestamp = u128;
+impl TimestampExt for Timestamp {
+    fn now() -> Timestamp {
+        std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap(/* Cannot be eariler than epoch */)
+        .as_nanos()
+    }
+}
+
+#[derive(Eq, PartialEq, Clone, Copy, Hash, Debug, Serialize, Deserialize)]
+pub struct Sha256Hash(pub [u8; 32]);
+
+impl Display for Sha256Hash {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        fmt_hex(&self.0, f)
+    }
+}
+
+impl From<[u8; 32]> for Sha256Hash {
+    fn from(value: [u8; 32]) -> Self {
+        Self(value)
+    }
 }

@@ -11,7 +11,7 @@ use crate::{
     CoinAddress, Transaction,
     serdes::hashsig,
     transaction::Signature,
-    util::{fmt_hex, hex_to_bytes, num_of_zeros_in_sha256},
+    util::{Sha256Hash, Timestamp, hex_to_bytes, num_of_zeros_in_sha256},
 };
 
 pub type BlockId = Sha256Hash;
@@ -24,25 +24,6 @@ impl BlockId {
 }
 
 pub type SequenceNo = u64;
-
-// nanoseconds.
-// TODO: consider a more approriate type. u128 doesn't port well to other languages?
-pub type Timestamp = u128;
-
-#[derive(Eq, PartialEq, Clone, Copy, Hash, Debug, Serialize, Deserialize)]
-pub struct Sha256Hash([u8; 32]);
-
-impl Display for Sha256Hash {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        fmt_hex(&self.0, f)
-    }
-}
-
-impl From<[u8; 32]> for Sha256Hash {
-    fn from(value: [u8; 32]) -> Self {
-        Self(value)
-    }
-}
 
 // FIXME: fixate the serialize order and layout.
 #[derive(Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
