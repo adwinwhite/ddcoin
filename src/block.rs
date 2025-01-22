@@ -1,8 +1,9 @@
 use std::{
     fmt::{Display, Formatter},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
+use anyhow::{Result, bail};
 use ed25519_dalek::{SigningKey, Verifier, VerifyingKey, ed25519::signature::SignerMut};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -11,7 +12,7 @@ use crate::{
     CoinAddress, Transaction,
     serdes::hashsig,
     transaction::Signature,
-    util::{Sha256Hash, Timestamp, hex_to_bytes, num_of_zeros_in_sha256},
+    util::{Difficulty, Sha256Hash, Timestamp, TimestampExt, hex_to_bytes},
 };
 
 pub type BlockId = Sha256Hash;
@@ -28,7 +29,8 @@ pub type SequenceNo = u64;
 // FIXME: fixate the serialize order and layout.
 #[derive(Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
 struct BlockInner {
-    sequence_no: SequenceNo,
+    seqno: SequenceNo,
+    difficulty: Difficulty,
     prev_id: BlockId,
     transactions: Vec<Transaction>,
     miner: CoinAddress,
@@ -39,11 +41,9 @@ struct BlockInner {
 impl BlockInner {
     fn verify_nonce(&self) -> bool {
         // panic risk: How can this serialization fail?
-        let bytes = hashsig::encode(self).unwrap();
+        let bytes = hashsig::encode(&self).unwrap();
         let hash = Sha256::digest(&bytes);
-        let num_of_zeros = num_of_zeros_in_sha256(hash.as_ref());
-        let required_zeros = self.sequence_no / Block::NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS + 1;
-        (num_of_zeros as u64) >= required_zeros
+        self.difficulty.is_met(*hash.as_ref())
     }
 }
 
@@ -59,7 +59,8 @@ pub struct Block {
 // 0. can this block trace back to genesis?
 // 1. is timestamp greater than previous block's and smaller than received time?
 // 2. does previous block's hash match? Yes, we use content addressing now.
-// 3. does previous block's seqno match?
+// 3. does previous block's seqno match? Do we need this field even?
+// 4. is difficulty valid?
 // [serde validation trick here](https://github.com/serde-rs/serde-rs.github.io/pull/148/files).
 // Perhaps I should make a macro to duplicate the struct.
 #[derive(Deserialize)]
@@ -94,11 +95,14 @@ impl Block {
     pub const BLOCK_TXN_LIMIT: usize = 20;
 
     // num_of_zeros = seq_no / THIS_CONST + 1;
-    pub const NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS: u64 = 10;
+    pub const NUM_OF_BLOCKS_BEFORE_DIFFICULTY_ADJUSTMENT: u64 = 10;
+
+    pub const AVERAGE_BLOCK_TIME: Duration = Duration::from_secs(60);
 
     pub const GENESIS: Block = Block {
         inner: BlockInner {
-            sequence_no: 0,
+            seqno: 0,
+            difficulty: Difficulty::GENESIS,
             prev_id: Sha256Hash([0; 32]),
             transactions: Vec::new(),
             miner: CoinAddress {
@@ -125,7 +129,11 @@ impl Block {
     }
 
     pub fn seqno(&self) -> SequenceNo {
-        self.inner.sequence_no
+        self.inner.seqno
+    }
+
+    pub fn difficulty(&self) -> Difficulty {
+        self.inner.difficulty
     }
 
     pub fn sha256(&self) -> Sha256Hash {
@@ -147,7 +155,7 @@ impl Display for Block {
         write!(
             f,
             "Block: seqno: {}, id: {}, prev_id: {}, miner: {}, nouce: {}, ",
-            self.inner.sequence_no,
+            self.inner.seqno,
             self.id(),
             self.inner.prev_id,
             self.inner.miner,
@@ -164,7 +172,8 @@ impl Display for Block {
 
 #[derive(Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
 pub struct UnconfirmedBlock {
-    sequence_no: u64,
+    seqno: u64,
+    difficulty: Difficulty,
     prev_id: BlockId,
     transactions: Vec<Transaction>,
     miner: CoinAddress,
@@ -192,17 +201,32 @@ impl std::error::Error for BlockValidationError {}
 
 // TODO: eliminate the need of passing miner address and signer at different places.
 impl UnconfirmedBlock {
-    pub fn new(prev: &Block, miner: CoinAddress, txns: Vec<Transaction>) -> Self {
-        Self {
-            sequence_no: prev.seqno() + 1,
+    // TODO: reconsider the chain argument.
+    pub fn new(
+        prev: &Block,
+        miner: CoinAddress,
+        txns: Vec<Transaction>,
+        prev_adjustment_time: Option<Timestamp>,
+    ) -> Result<Self> {
+        let timestamp = Timestamp::now();
+        let seqno = prev.seqno() + 1;
+        let difficulty = if seqno % Block::NUM_OF_BLOCKS_BEFORE_DIFFICULTY_ADJUSTMENT == 0 {
+            let Some(prev_adjustment_time) = prev_adjustment_time else {
+                bail!("Previous adjustment timestamp is required for difficulty adjustment")
+            };
+            let time_span_actual = timestamp - prev_adjustment_time;
+            prev.difficulty().adjust_with_actual_span(time_span_actual)
+        } else {
+            prev.difficulty()
+        };
+        Ok(Self {
+            seqno,
+            difficulty,
             prev_id: prev.id(),
             transactions: txns,
             miner,
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap(/* can't be ealier than epoch */)
-                .as_nanos(),
-        }
+            timestamp,
+        })
     }
 
     pub fn with_nonce(
@@ -211,7 +235,8 @@ impl UnconfirmedBlock {
         nonce: u64,
     ) -> Result<Block, BlockValidationError> {
         let inner = BlockInner {
-            sequence_no: self.sequence_no,
+            seqno: self.seqno,
+            difficulty: self.difficulty,
             prev_id: self.prev_id,
             transactions: self.transactions,
             miner: self.miner,
@@ -227,9 +252,7 @@ impl UnconfirmedBlock {
         // panic risk: How can this serialization fail?
         let bytes = hashsig::encode(&inner).unwrap();
         let hash = Sha256::digest(&bytes);
-        let num_of_zeros = num_of_zeros_in_sha256(hash.as_ref());
-        let required_zeros = self.sequence_no / Block::NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS + 1;
-        if (num_of_zeros as u64) < required_zeros {
+        if !inner.difficulty.is_met(*hash.as_ref()) {
             return Err(BlockValidationError::InvalidNonce);
         }
 
@@ -240,8 +263,6 @@ impl UnconfirmedBlock {
 
     // FIXME: should I keep this method here? Or move it to test util?
     pub fn find_nouce(&self) -> u64 {
-        let required_zeros = self.sequence_no / Block::NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS + 1;
-
         let mut bytes = hashsig::encode(self).unwrap();
         let len = bytes.len();
         bytes.extend_from_slice(&[0; 8]);
@@ -249,8 +270,7 @@ impl UnconfirmedBlock {
         for nouce in 0_u64.. {
             bytes[len..].copy_from_slice(&nouce.to_le_bytes()[..]);
             let hash = Sha256::digest(&bytes);
-            let num_of_zeros = num_of_zeros_in_sha256(hash.as_ref());
-            if (num_of_zeros as u64) >= required_zeros {
+            if self.difficulty.is_met(*hash.as_ref()) {
                 valid_nouce = nouce;
                 break;
             }
@@ -269,7 +289,11 @@ impl UnconfirmedBlock {
 mod tests {
     use ed25519_dalek::SigningKey;
 
-    use crate::{UnconfirmedBlock, block::Sha256Hash};
+    use crate::{
+        UnconfirmedBlock,
+        block::Sha256Hash,
+        util::{Difficulty, Timestamp, TimestampExt},
+    };
 
     #[test]
     fn generate_genesis_block() {
@@ -277,14 +301,12 @@ mod tests {
         let mut signing_key = SigningKey::generate(&mut csprng);
         let miner = signing_key.verifying_key().into();
         let unconfirmed = UnconfirmedBlock {
-            sequence_no: 0,
+            seqno: 0,
+            difficulty: Difficulty::GENESIS,
             prev_id: Sha256Hash([0; 32]),
             transactions: Vec::new(),
             miner,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
+            timestamp: Timestamp::now(),
         };
 
         let genesis_block = unconfirmed.try_confirm(&mut signing_key).unwrap();

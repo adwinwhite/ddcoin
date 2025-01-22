@@ -1,6 +1,12 @@
-use std::fmt::{Display, Formatter};
+use std::{
+    fmt::{Display, Formatter},
+    u128,
+};
 
+use ethnum::U256;
 use serde::{Deserialize, Serialize};
+
+use crate::Block;
 
 pub(crate) const fn hex_to_bytes<const N: usize>(s: &str) -> [u8; N] {
     const fn ascii_to_num(c: u8) -> u8 {
@@ -32,21 +38,6 @@ pub(crate) const fn hex_to_bytes<const N: usize>(s: &str) -> [u8; N] {
         i += 1;
     }
     bytes
-}
-
-// Use big endian as that's what std function do.
-pub fn num_of_zeros_in_sha256(bytes: &[u8; 32]) -> u32 {
-    let first_half = bytes[..16].try_into().unwrap();
-    let first = u128::from_be_bytes(first_half);
-    let first_num = first.leading_zeros();
-    if first_num < 128 {
-        first_num
-    } else {
-        let second_half = bytes[16..32].try_into().unwrap();
-        let second = u128::from_be_bytes(second_half);
-        let second_num = second.leading_zeros();
-        first_num + second_num
-    }
 }
 
 pub(crate) fn fmt_hex(bytes: &[u8], f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -83,5 +74,26 @@ impl Display for Sha256Hash {
 impl From<[u8; 32]> for Sha256Hash {
     fn from(value: [u8; 32]) -> Self {
         Self(value)
+    }
+}
+
+// a 256 bit target level.
+#[derive(Eq, PartialEq, Clone, Copy, Hash, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Difficulty(U256);
+
+impl Difficulty {
+    // FIXME: how to set this?
+    pub const GENESIS: Self = Self(U256::from_words(u128::MAX >> 2, u128::MAX));
+
+    // FIXME: avoid rapid change and overflow.
+    pub fn adjust_with_actual_span(&self, actual: Timestamp) -> Self {
+        let expected: U256 = Block::AVERAGE_BLOCK_TIME.as_nanos().into();
+        let actual: U256 = actual.into();
+        Self((self.0 / expected) * actual)
+    }
+
+    pub fn is_met(&self, hash: [u8; 32]) -> bool {
+        let hash = U256::from_le_bytes(hash);
+        hash < self.0
     }
 }

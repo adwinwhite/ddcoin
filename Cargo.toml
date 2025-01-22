@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1.0.95"
 bincode = { version = "2.0.0-rc.3", features = ["serde"] }
 ed25519-dalek = "2.1.1"
+ethnum = { version = "1.5.0", features = ["serde"] }
 futures-lite = "2.5.0"
 iroh = { version = "0.30.0", features = ["discovery-local-network"] }
 ractor = { version = "0.14.2", default-features = false, features = ["message_span_propogation", "tokio_runtime"] }
