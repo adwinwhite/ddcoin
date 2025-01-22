@@ -222,7 +222,7 @@ mod tests {
         let mut tasks = JoinSet::new();
         let alpn = random_alpn();
         let mut blocks =
-            Vec::with_capacity((Block::NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS as usize) + 2);
+            Vec::with_capacity((Block::NUM_OF_BLOCKS_BEFORE_DIFFICULTY_ADJUSTMENT as usize) + 2);
         for i in 0..blocks.capacity() {
             let prev_block = if i == 0 {
                 &Block::GENESIS
@@ -279,7 +279,7 @@ mod tests {
         let mut tasks = JoinSet::new();
         let alpn = random_alpn();
         let mut old_chain =
-            Vec::with_capacity((Block::NUM_OF_BLOCKS_BEFORE_INCREMENT_ZEROS as usize) + 2);
+            Vec::with_capacity((Block::NUM_OF_BLOCKS_BEFORE_DIFFICULTY_ADJUSTMENT as usize) + 2);
         for i in 0..old_chain.capacity() {
             let prev_block = if i == 0 {
                 &Block::GENESIS

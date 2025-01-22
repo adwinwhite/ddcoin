@@ -28,6 +28,8 @@ impl MinerConfig {
                 // peerhub is bound to have leading block otherwise something is going wrong.
                 ractor::call!(peer_hub, PeerHubActorMessage::QueryBlock, id)?.unwrap()
             };
+            let prev_adjustment_time =
+                ractor::call!(peer_hub, PeerHubActorMessage::QueryDifficultyAdjustTime)?;
             let mut amounts = ractor::call!(peer_hub, PeerHubActorMessage::QueryMemPool)?;
             amounts.sort_by_key(|k| k.1);
             let top_ids = amounts
@@ -39,8 +41,12 @@ impl MinerConfig {
             let txns = txns.into_iter().flatten().collect::<Vec<_>>();
             // FIXME: allow block with no transaction or not. Will produce a lot of empty blocks.
             if !txns.is_empty() {
-                let unconfirmed_block =
-                    UnconfirmedBlock::new(&leading_block, self.miner.clone(), txns);
+                let unconfirmed_block = UnconfirmedBlock::new(
+                    &leading_block,
+                    self.miner.clone(),
+                    txns,
+                    Some(prev_adjustment_time),
+                )?;
                 let block = unconfirmed_block.try_confirm(&mut self.signing_key)?;
                 ractor::cast!(peer_hub, PeerHubActorMessage::NewBlock(None, block))?;
             }
