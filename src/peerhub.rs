@@ -8,10 +8,10 @@ use anyhow::{Context, Result};
 use iroh::{NodeId, endpoint::SendStream};
 use ractor::{Actor, RpcReplyPort};
 use tokio::io::AsyncWriteExt;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
-    Block,
+    Block, Config,
     block::{BlockId, SequenceNo},
     peer::{BroadcastMessage, PeerMessage},
     transaction::{Transaction, TransactionId},
@@ -23,25 +23,9 @@ const PEER_SIZE_LIMIT: usize = 3;
 
 pub struct PeerHubActor;
 
+// TODO: eliminate this wrapper since we can define associated functions in State.
 struct BlockMap {
     map: HashMap<BlockId, Block>,
-}
-
-impl BlockMap {
-    // FIXME: prevent malicious actor sending cycles and causing infinite loop.
-    fn block_root(&self, block_id: &BlockId) -> BlockId {
-        let mut current_id = *block_id;
-        loop {
-            if current_id.is_genesis() {
-                return Block::GENESIS.id();
-            }
-            if let Some(block) = self.get(&current_id) {
-                current_id = block.prev_id();
-            } else {
-                return *block_id;
-            }
-        }
-    }
 }
 
 impl Deref for BlockMap {
@@ -64,12 +48,14 @@ impl From<HashMap<BlockId, Block>> for BlockMap {
 }
 
 pub(crate) struct BlockChain<'a> {
-    chain: Vec<&'a Block>,
+    chain: Box<[&'a Block]>,
 }
 
-impl BlockChain<'_> {
-    pub fn new<'a>(chain: Vec<&'a Block>) -> BlockChain<'a> {
-        BlockChain { chain }
+impl<'a> BlockChain<'a> {
+    pub fn new<'b>(chain: &'b [&'a Block]) -> BlockChain<'a> {
+        BlockChain {
+            chain: chain.into(),
+        }
     }
 
     pub fn transaction_depth(&self, txn_id: &TransactionId) -> Option<u64> {
@@ -83,13 +69,15 @@ impl BlockChain<'_> {
 }
 
 impl<'a> Deref for BlockChain<'a> {
-    type Target = Vec<&'a Block>;
+    type Target = [&'a Block];
     fn deref(&self) -> &Self::Target {
         &self.chain
     }
 }
 
 pub struct PeerHubActorState {
+    config: Config,
+    genesis_id: BlockId,
     peers: HashMap<NodeId, SendStream>,
     // FIXME: Do we still need this?
     annoucements: HashMap<TransactionId, NodeId>,
@@ -104,10 +92,15 @@ pub struct PeerHubActorState {
 }
 
 impl PeerHubActorState {
-    pub fn new(local_node_id: NodeId) -> Self {
+    pub fn new(local_node_id: NodeId, config: Config) -> Self {
         let mut blocks = HashMap::new();
-        blocks.insert(Block::GENESIS.id(), Block::GENESIS);
+        let genesis_block =
+            Block::create_genesis(*config.genesis_difficulty(), config.genesis_timestamp());
+        let genesis_id = genesis_block.id();
+        blocks.insert(genesis_id, genesis_block);
         Self {
+            config,
+            genesis_id,
             peers: HashMap::new(),
             annoucements: HashMap::new(),
             mempool: HashMap::new(),
@@ -115,8 +108,23 @@ impl PeerHubActorState {
             unconfirmed_blocks: HashMap::new().into(),
             invalid_blocks: HashSet::new(),
             next_blocks: HashMap::new(),
-            leading_block: Block::GENESIS.id(),
+            leading_block: genesis_id,
             local_node_id,
+        }
+    }
+
+    // FIXME: prevent malicious actor sending cycles and causing infinite loop.
+    fn block_root(&self, block_id: &BlockId) -> BlockId {
+        let mut current_id = *block_id;
+        loop {
+            if current_id == self.genesis_id {
+                return self.genesis_id;
+            }
+            if let Some(block) = self.unconfirmed_blocks.get(&current_id) {
+                current_id = block.prev_id();
+            } else {
+                return *block_id;
+            }
         }
     }
 
@@ -162,27 +170,43 @@ impl PeerHubActorState {
             || self.invalid_blocks.contains(block_id)
     }
 
-    fn confirmed_chain(&self) -> BlockChain<'_> {
+    // TODO: rewrite using safe code.
+    fn confirmed_chain<'a>(&'a self) -> BlockChain<'a> {
         let mut block_id = self.leading_block;
-        let mut blocks = Vec::new();
+        let mut blocks =
+            Box::<[&'a Block]>::new_uninit_slice((self.leading_block_seqno() + 1) as usize);
         loop {
             let block = self.valid_blocks.get(&block_id).unwrap();
             let prev_block_id = block.prev_id();
-            block_id = prev_block_id;
-            blocks.push(block);
-            if prev_block_id.is_genesis() {
+            // # Safety
+            // We are sure that leading block can trace back to genesis block.
+            unsafe {
+                blocks[block.seqno() as usize].as_mut_ptr().write(block);
+            };
+
+            if block_id == self.genesis_id {
                 break;
             }
+            block_id = prev_block_id;
         }
-        BlockChain::new(blocks)
+        // # Safety
+        // Combined with above.
+        let blocks = unsafe { blocks.assume_init() };
+        BlockChain::new(&blocks)
     }
 
-    fn difficulty_adjusted_block(&self) -> &Block {
+    fn prev_difficulty_adjusted_block(&self, seqno: SequenceNo) -> &Block {
         let chain = self.confirmed_chain();
         // FIXME: consider chain that's too long.
-        let rewind_number =
-            chain.len() % (Block::NUM_OF_BLOCKS_BEFORE_DIFFICULTY_ADJUSTMENT as usize);
-        chain[chain.len() - rewind_number]
+        let rewind_number = {
+            let rewind = seqno % self.config.difficulty_adjustment_period();
+            if rewind == 0 {
+                self.config.difficulty_adjustment_period()
+            } else {
+                rewind
+            }
+        };
+        chain[(seqno - rewind_number) as usize]
     }
 
     fn add_invalid_block(
@@ -243,8 +267,11 @@ impl PeerHubActorState {
         // Check previous block.
         if let Some(prev_block) = self.valid_blocks.get(&block.prev_id()) {
             // Check previous timestamp.
-            if block.timestamp() > prev_block.timestamp() {
-                warn!("Block {} has invalid timestamp", block.id());
+            if block.timestamp() < prev_block.timestamp() {
+                warn!(
+                    "Block {} has invalid timestamp: ealier than the previous block",
+                    block.id()
+                );
                 Self::add_invalid_block(
                     &mut self.invalid_blocks,
                     &mut self.next_blocks,
@@ -266,17 +293,23 @@ impl PeerHubActorState {
 
             // Check difficulty.
             let expected_difficulty =
-                if block.seqno() % Block::NUM_OF_BLOCKS_BEFORE_DIFFICULTY_ADJUSTMENT == 0 {
-                    let prev_adjustment_time = self.difficulty_adjusted_block().timestamp();
+                if block.seqno() % self.config.difficulty_adjustment_period() == 0 {
+                    let prev_adjustment_time = self
+                        .prev_difficulty_adjusted_block(block.seqno())
+                        .timestamp();
                     let time_span_actual = block.timestamp() - prev_adjustment_time;
                     prev_block
                         .difficulty()
-                        .adjust_with_actual_span(time_span_actual)
+                        .adjust_with_actual_span(time_span_actual, &self.config)
                 } else {
                     prev_block.difficulty()
                 };
             if block.difficulty() != expected_difficulty {
-                warn!("Block {} has invalid difficulty", block.id());
+                warn!(
+                    "Block {} has invalid difficulty, expected {}",
+                    block.id(),
+                    expected_difficulty
+                );
                 Self::add_invalid_block(
                     &mut self.invalid_blocks,
                     &mut self.next_blocks,
@@ -323,7 +356,7 @@ pub enum PeerHubActorMessage {
     QueryLocalNodeId(RpcReplyPort<NodeId>),
     QueryMemPool(RpcReplyPort<Vec<(TransactionId, Amount)>>),
     QueryLeadingBlock(RpcReplyPort<BlockId>),
-    QueryDifficultyAdjustTime(RpcReplyPort<Timestamp>),
+    QueryDifficultyAdjustTime(SequenceNo, RpcReplyPort<Timestamp>),
 }
 
 impl Display for PeerHubActorMessage {
@@ -385,8 +418,8 @@ impl Display for PeerHubActorMessage {
                 }
                 write!(f, "])")
             }
-            PeerHubActorMessage::QueryDifficultyAdjustTime(_rpc_reply_port) => {
-                write!(f, "QueryDifficultyAdjustTime")
+            PeerHubActorMessage::QueryDifficultyAdjustTime(seqno, _rpc_reply_port) => {
+                write!(f, "QueryDifficultyAdjustTime({})", seqno)
             }
         }
     }
@@ -395,14 +428,14 @@ impl Display for PeerHubActorMessage {
 impl Actor for PeerHubActor {
     type Msg = PeerHubActorMessage;
     type State = PeerHubActorState;
-    type Arguments = NodeId;
+    type Arguments = (NodeId, Config);
 
     async fn pre_start(
         &self,
         _myself: ractor::ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> std::result::Result<Self::State, ractor::ActorProcessingErr> {
-        Ok(PeerHubActorState::new(args))
+        Ok(PeerHubActorState::new(args.0, args.1))
     }
 
     async fn handle(
@@ -533,7 +566,10 @@ impl Actor for PeerHubActor {
                 // Check time
                 let current = Timestamp::now();
                 if block.timestamp() > current {
-                    warn!("Block {} has invalid timestamp", block.id());
+                    warn!(
+                        "Block {} has invalid timestamp: later than current",
+                        block.id()
+                    );
                     PeerHubActorState::add_invalid_block(
                         &mut state.invalid_blocks,
                         &mut state.next_blocks,
@@ -550,15 +586,15 @@ impl Actor for PeerHubActor {
                     // Check whether it's a dangling block.
                     if state.unconfirmed_blocks.contains_key(&block_id) {
                         // Request the missing block.
-                        let missing_root = state.unconfirmed_blocks.block_root(&block_prev_id);
-                        debug_assert_ne!(missing_root, Block::GENESIS.id());
+                        let missing_root = state.block_root(&block_prev_id);
+                        debug_assert_ne!(missing_root, state.genesis_id);
                         let peer_msg = PeerMessage::GetBlockRequest(missing_root);
-                        state
-                            .send_to_peer(
-                                &peer_msg,
-                                node_id.unwrap(/* block mined by myself won't have missing blocks */),
-                            )
-                            .await?;
+                        if let Some(node_id) = node_id {
+                            state.send_to_peer(&peer_msg, node_id).await?;
+                        } else {
+                            // block mined by myself shouldn't have missing blocks.
+                            error!("Block {} is missing its previous block", block_id);
+                        }
                     }
                 } else {
                     for id in valid_ids {
@@ -606,8 +642,8 @@ impl Actor for PeerHubActor {
                     .collect::<Vec<_>>();
                 reply.send(depths)?;
             }
-            PeerHubActorMessage::QueryDifficultyAdjustTime(reply) => {
-                let adjustment_block = state.difficulty_adjusted_block();
+            PeerHubActorMessage::QueryDifficultyAdjustTime(seqno, reply) => {
+                let adjustment_block = state.prev_difficulty_adjusted_block(seqno);
                 reply.send(adjustment_block.timestamp())?;
             }
         }
