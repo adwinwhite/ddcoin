@@ -11,7 +11,7 @@ use tokio::io::AsyncWriteExt;
 use tracing::{info, warn};
 
 use crate::{
-    Block,
+    Block, Config,
     block::{BlockId, SequenceNo},
     peer::{BroadcastMessage, PeerMessage},
     transaction::{Transaction, TransactionId},
@@ -23,25 +23,9 @@ const PEER_SIZE_LIMIT: usize = 3;
 
 pub struct PeerHubActor;
 
+// TODO: eliminate this wrapper since we can define associated functions in State.
 struct BlockMap {
     map: HashMap<BlockId, Block>,
-}
-
-impl BlockMap {
-    // FIXME: prevent malicious actor sending cycles and causing infinite loop.
-    fn block_root(&self, block_id: &BlockId) -> BlockId {
-        let mut current_id = *block_id;
-        loop {
-            if current_id.is_genesis() {
-                return Block::GENESIS.id();
-            }
-            if let Some(block) = self.get(&current_id) {
-                current_id = block.prev_id();
-            } else {
-                return *block_id;
-            }
-        }
-    }
 }
 
 impl Deref for BlockMap {
@@ -90,6 +74,8 @@ impl<'a> Deref for BlockChain<'a> {
 }
 
 pub struct PeerHubActorState {
+    config: Config,
+    genesis_id: BlockId,
     peers: HashMap<NodeId, SendStream>,
     // FIXME: Do we still need this?
     annoucements: HashMap<TransactionId, NodeId>,
@@ -104,10 +90,15 @@ pub struct PeerHubActorState {
 }
 
 impl PeerHubActorState {
-    pub fn new(local_node_id: NodeId) -> Self {
+    pub fn new(local_node_id: NodeId, config: Config) -> Self {
         let mut blocks = HashMap::new();
-        blocks.insert(Block::GENESIS.id(), Block::GENESIS);
+        let genesis_block =
+            Block::create_genesis(*config.genesis_difficulty(), config.genesis_timestamp());
+        let genesis_id = genesis_block.id();
+        blocks.insert(genesis_id, genesis_block);
         Self {
+            config,
+            genesis_id,
             peers: HashMap::new(),
             annoucements: HashMap::new(),
             mempool: HashMap::new(),
@@ -115,8 +106,23 @@ impl PeerHubActorState {
             unconfirmed_blocks: HashMap::new().into(),
             invalid_blocks: HashSet::new(),
             next_blocks: HashMap::new(),
-            leading_block: Block::GENESIS.id(),
+            leading_block: genesis_id,
             local_node_id,
+        }
+    }
+
+    // FIXME: prevent malicious actor sending cycles and causing infinite loop.
+    fn block_root(&self, block_id: &BlockId) -> BlockId {
+        let mut current_id = *block_id;
+        loop {
+            if current_id == self.genesis_id {
+                return self.genesis_id;
+            }
+            if let Some(block) = self.unconfirmed_blocks.get(&current_id) {
+                current_id = block.prev_id();
+            } else {
+                return *block_id;
+            }
         }
     }
 
@@ -170,7 +176,7 @@ impl PeerHubActorState {
             let prev_block_id = block.prev_id();
             block_id = prev_block_id;
             blocks.push(block);
-            if prev_block_id.is_genesis() {
+            if prev_block_id == self.genesis_id {
                 break;
             }
         }
@@ -180,8 +186,7 @@ impl PeerHubActorState {
     fn difficulty_adjusted_block(&self) -> &Block {
         let chain = self.confirmed_chain();
         // FIXME: consider chain that's too long.
-        let rewind_number =
-            chain.len() % (Block::NUM_OF_BLOCKS_BEFORE_DIFFICULTY_ADJUSTMENT as usize);
+        let rewind_number = chain.len() % (self.config.difficulty_adjustment_period() as usize);
         chain[chain.len() - rewind_number]
     }
 
@@ -266,12 +271,12 @@ impl PeerHubActorState {
 
             // Check difficulty.
             let expected_difficulty =
-                if block.seqno() % Block::NUM_OF_BLOCKS_BEFORE_DIFFICULTY_ADJUSTMENT == 0 {
+                if block.seqno() % self.config.difficulty_adjustment_period() == 0 {
                     let prev_adjustment_time = self.difficulty_adjusted_block().timestamp();
                     let time_span_actual = block.timestamp() - prev_adjustment_time;
                     prev_block
                         .difficulty()
-                        .adjust_with_actual_span(time_span_actual)
+                        .adjust_with_actual_span(time_span_actual, &self.config)
                 } else {
                     prev_block.difficulty()
                 };
@@ -395,14 +400,14 @@ impl Display for PeerHubActorMessage {
 impl Actor for PeerHubActor {
     type Msg = PeerHubActorMessage;
     type State = PeerHubActorState;
-    type Arguments = NodeId;
+    type Arguments = (NodeId, Config);
 
     async fn pre_start(
         &self,
         _myself: ractor::ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> std::result::Result<Self::State, ractor::ActorProcessingErr> {
-        Ok(PeerHubActorState::new(args))
+        Ok(PeerHubActorState::new(args.0, args.1))
     }
 
     async fn handle(
@@ -550,8 +555,8 @@ impl Actor for PeerHubActor {
                     // Check whether it's a dangling block.
                     if state.unconfirmed_blocks.contains_key(&block_id) {
                         // Request the missing block.
-                        let missing_root = state.unconfirmed_blocks.block_root(&block_prev_id);
-                        debug_assert_ne!(missing_root, Block::GENESIS.id());
+                        let missing_root = state.block_root(&block_prev_id);
+                        debug_assert_ne!(missing_root, state.genesis_id);
                         let peer_msg = PeerMessage::GetBlockRequest(missing_root);
                         state
                             .send_to_peer(

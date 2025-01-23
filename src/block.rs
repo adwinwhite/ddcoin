@@ -1,7 +1,4 @@
-use std::{
-    fmt::{Display, Formatter},
-    time::Duration,
-};
+use std::fmt::{Display, Formatter};
 
 use anyhow::{Result, bail};
 use ed25519_dalek::{SigningKey, Verifier, VerifyingKey, ed25519::signature::SignerMut};
@@ -9,20 +6,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CoinAddress, Transaction,
+    CoinAddress, Config, Transaction,
     serdes::hashsig,
     transaction::Signature,
     util::{Difficulty, Sha256Hash, Timestamp, TimestampExt, hex_to_bytes},
 };
 
 pub type BlockId = Sha256Hash;
-
-impl BlockId {
-    // TODO: store genesis_id as a constant to avoid runtime computation.
-    pub fn is_genesis(&self) -> bool {
-        *self == Block::GENESIS.id()
-    }
-}
 
 pub type SequenceNo = u64;
 
@@ -92,33 +82,23 @@ impl std::convert::TryFrom<BlockValidator> for Block {
 }
 
 impl Block {
-    pub const BLOCK_TXN_LIMIT: usize = 20;
+    pub(crate) fn create_genesis(difficulty: Difficulty, timestamp: Timestamp) -> Self {
+        let secret_key_bytes =
+            hex_to_bytes("01a4b29a7fc6127080b9eb962ec4f18a3a61d5e011cc3fa821d5d1d1f30d0ddb");
 
-    // num_of_zeros = seq_no / THIS_CONST + 1;
-    pub const NUM_OF_BLOCKS_BEFORE_DIFFICULTY_ADJUSTMENT: u64 = 10;
-
-    pub const AVERAGE_BLOCK_TIME: Duration = Duration::from_secs(60);
-
-    pub const GENESIS: Block = Block {
-        inner: BlockInner {
+        let mut signing_key: SigningKey = SigningKey::from_bytes(&secret_key_bytes);
+        let miner = signing_key.verifying_key().into();
+        let unconfirmed = UnconfirmedBlock {
             seqno: 0,
-            difficulty: Difficulty::GENESIS,
+            difficulty,
             prev_id: Sha256Hash([0; 32]),
             transactions: Vec::new(),
-            miner: CoinAddress {
-                pub_key: hex_to_bytes(
-                    "3acee5b5591717dfbb2f773823e916d01e586de6695bb07b9665428cf88df30d",
-                ),
-            },
-            timestamp: Duration::from_secs(1737430342).as_nanos(),
-            nonce: 0,
-        },
-        signature: Signature {
-            sig: hex_to_bytes(
-                "e55aa435764adddf0eb9ea47f3836caf0a12d8d12c05e552a15d3cf5f1469c6adc90d16db5654983f1580caad1304ef67874a4e85682c91cb47aa1db82898701",
-            ),
-        },
-    };
+            miner,
+            timestamp,
+        };
+
+        unconfirmed.try_confirm(&mut signing_key).unwrap()
+    }
 
     pub fn id(&self) -> BlockId {
         self.sha256()
@@ -172,7 +152,7 @@ impl Display for Block {
 
 #[derive(Eq, PartialEq, Clone, Debug, Serialize, Deserialize)]
 pub struct UnconfirmedBlock {
-    seqno: u64,
+    seqno: SequenceNo,
     difficulty: Difficulty,
     prev_id: BlockId,
     transactions: Vec<Transaction>,
@@ -207,15 +187,17 @@ impl UnconfirmedBlock {
         miner: CoinAddress,
         txns: Vec<Transaction>,
         prev_adjustment_time: Option<Timestamp>,
+        config: &Config,
     ) -> Result<Self> {
         let timestamp = Timestamp::now();
         let seqno = prev.seqno() + 1;
-        let difficulty = if seqno % Block::NUM_OF_BLOCKS_BEFORE_DIFFICULTY_ADJUSTMENT == 0 {
+        let difficulty = if seqno % config.difficulty_adjustment_period() == 0 {
             let Some(prev_adjustment_time) = prev_adjustment_time else {
                 bail!("Previous adjustment timestamp is required for difficulty adjustment")
             };
             let time_span_actual = timestamp - prev_adjustment_time;
-            prev.difficulty().adjust_with_actual_span(time_span_actual)
+            prev.difficulty()
+                .adjust_with_actual_span(time_span_actual, config)
         } else {
             prev.difficulty()
         };
@@ -243,9 +225,10 @@ impl UnconfirmedBlock {
             timestamp: self.timestamp,
             nonce,
         };
-        if inner.transactions.len() > Block::BLOCK_TXN_LIMIT {
-            return Err(BlockValidationError::BlockSizeExceeded);
-        }
+        // TODO: do we really need this check here?
+        // if inner.transactions.len() > Block::BLOCK_TXN_LIMIT {
+        // return Err(BlockValidationError::BlockSizeExceeded);
+        // }
         if inner.miner != signing_key.verifying_key().into() {
             return Err(BlockValidationError::MinerNotMatchSigner);
         }
@@ -282,36 +265,5 @@ impl UnconfirmedBlock {
     pub fn try_confirm(self, signing_key: &mut SigningKey) -> Result<Block, BlockValidationError> {
         let valid_nouce = self.find_nouce();
         self.with_nonce(signing_key, valid_nouce)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use ed25519_dalek::SigningKey;
-
-    use crate::{
-        UnconfirmedBlock,
-        block::Sha256Hash,
-        util::{Difficulty, Timestamp, TimestampExt},
-    };
-
-    #[test]
-    fn generate_genesis_block() {
-        let mut csprng = rand::rngs::OsRng;
-        let mut signing_key = SigningKey::generate(&mut csprng);
-        let miner = signing_key.verifying_key().into();
-        let unconfirmed = UnconfirmedBlock {
-            seqno: 0,
-            difficulty: Difficulty::GENESIS,
-            prev_id: Sha256Hash([0; 32]),
-            transactions: Vec::new(),
-            miner,
-            timestamp: Timestamp::now(),
-        };
-
-        let genesis_block = unconfirmed.try_confirm(&mut signing_key).unwrap();
-        println!("Genesis block: {}", genesis_block);
-        println!("Miner: {}", genesis_block.inner.miner);
-        println!("Signature: {}", genesis_block.signature);
     }
 }

@@ -1,12 +1,9 @@
-use std::{
-    fmt::{Display, Formatter},
-    u128,
-};
+use std::fmt::{Display, Formatter};
 
 use ethnum::U256;
 use serde::{Deserialize, Serialize};
 
-use crate::Block;
+use crate::Config;
 
 pub(crate) const fn hex_to_bytes<const N: usize>(s: &str) -> [u8; N] {
     const fn ascii_to_num(c: u8) -> u8 {
@@ -82,18 +79,31 @@ impl From<[u8; 32]> for Sha256Hash {
 pub struct Difficulty(U256);
 
 impl Difficulty {
-    // FIXME: how to set this?
-    pub const GENESIS: Self = Self(U256::from_words(u128::MAX >> 2, u128::MAX));
-
-    // FIXME: avoid rapid change and overflow.
-    pub fn adjust_with_actual_span(&self, actual: Timestamp) -> Self {
-        let expected: U256 = Block::AVERAGE_BLOCK_TIME.as_nanos().into();
+    pub const fn new(d: U256) -> Self {
+        Self(d)
+    }
+    pub fn adjust_with_actual_span(&self, actual: Timestamp, config: &Config) -> Self {
+        let expected: U256 = (config.average_block_time().as_nanos()
+            * u128::from(config.difficulty_adjustment_period()))
+        .into();
         let actual: U256 = actual.into();
-        Self((self.0 / expected) * actual)
+        if actual > expected * U256::from(4_u32) {
+            Self(self.0.saturating_mul(U256::from(4_u32)))
+        } else if actual < expected / U256::from(4_u32) {
+            Self((self.0 / U256::from(4_u32)).max(U256::ONE))
+        } else {
+            Self((self.0 / expected).max(U256::ONE).saturating_mul(actual))
+        }
     }
 
     pub fn is_met(&self, hash: [u8; 32]) -> bool {
         let hash = U256::from_le_bytes(hash);
         hash < self.0
+    }
+}
+
+impl From<U256> for Difficulty {
+    fn from(value: U256) -> Self {
+        Self(value)
     }
 }

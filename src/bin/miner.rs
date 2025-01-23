@@ -1,7 +1,7 @@
 #![feature(never_type)]
 
 use anyhow::Result;
-use ddcoin::{Block, CoinAddress, PeerHubActorMessage, UnconfirmedBlock};
+use ddcoin::{CoinAddress, PeerHubActorMessage, UnconfirmedBlock};
 use ed25519_dalek::SigningKey;
 use ractor::concurrency::Duration;
 
@@ -21,6 +21,7 @@ impl MinerConfig {
     }
 
     async fn run(mut self) -> Result<!> {
+        let peerhub_config = self.peerhub_config.clone();
         let (peer_hub, _handle) = self.peerhub_config.run().await?;
         loop {
             let leading_block = {
@@ -34,7 +35,7 @@ impl MinerConfig {
             amounts.sort_by_key(|k| k.1);
             let top_ids = amounts
                 .into_iter()
-                .take(Block::BLOCK_TXN_LIMIT)
+                .take(peerhub_config.block_txn_limit() as usize)
                 .map(|(id, _)| id)
                 .collect::<Vec<_>>();
             let txns = ractor::call!(peer_hub, PeerHubActorMessage::QueryTransactions, top_ids)?;
@@ -46,6 +47,7 @@ impl MinerConfig {
                     self.miner.clone(),
                     txns,
                     Some(prev_adjustment_time),
+                    &peerhub_config,
                 )?;
                 let block = unconfirmed_block.try_confirm(&mut self.signing_key)?;
                 ractor::cast!(peer_hub, PeerHubActorMessage::NewBlock(None, block))?;
@@ -64,12 +66,7 @@ async fn main() -> Result<!> {
     let signing_key = SigningKey::generate(&mut csprng);
     let miner: CoinAddress = signing_key.verifying_key().into();
 
-    let alpn = std::env::var("DDCOIN_ALPN");
-    let config = if let Ok(alpn) = alpn {
-        ddcoin::Config::with_local_discovery(alpn.as_bytes())
-    } else {
-        ddcoin::Config::default()
-    };
+    let config = ddcoin::Config::default();
     let miner_config = MinerConfig::new(signing_key, miner, config);
     miner_config.run().await
 }
@@ -85,7 +82,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_node() -> Result<()> {
-        let alpn = random_alpn();
+        let config = config_with_random_alpn();
         let mut tasks = JoinSet::new();
         {
             let mut csprng = rand::rngs::OsRng;
