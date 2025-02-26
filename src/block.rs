@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     CoinAddress, Config, Transaction,
     serdes::hashsig,
-    transaction::Signature,
+    transaction::{Cash, Signature},
     util::{Difficulty, Sha256Hash, Timestamp, TimestampExt, hex_to_bytes},
 };
 
@@ -23,6 +23,7 @@ struct BlockInner {
     difficulty: Difficulty,
     prev_id: BlockId,
     transactions: Vec<Transaction>,
+    reward: Cash,
     miner: CoinAddress,
     timestamp: Timestamp,
     nonce: u64,
@@ -51,6 +52,8 @@ pub struct Block {
 // 2. does previous block's hash match? Yes, we use content addressing now.
 // 3. does previous block's seqno match? Do we need this field even?
 // 4. is difficulty valid?
+// 5. are transactions' UTOs valid?
+// 6. is reward valid? subsidy + fees. this is local. well it depends on config thus global.
 // [serde validation trick here](https://github.com/serde-rs/serde-rs.github.io/pull/148/files).
 // Perhaps I should make a macro to duplicate the struct.
 #[derive(Deserialize)]
@@ -82,22 +85,36 @@ impl std::convert::TryFrom<BlockValidator> for Block {
 }
 
 impl Block {
-    pub(crate) fn create_genesis(difficulty: Difficulty, timestamp: Timestamp) -> Self {
+    pub(crate) fn create_genesis(
+        difficulty: Difficulty,
+        timestamp: Timestamp,
+        subsidy: u64,
+    ) -> Self {
         let secret_key_bytes =
             hex_to_bytes("01a4b29a7fc6127080b9eb962ec4f18a3a61d5e011cc3fa821d5d1d1f30d0ddb");
 
         let mut signing_key: SigningKey = SigningKey::from_bytes(&secret_key_bytes);
-        let miner = signing_key.verifying_key().into();
+        let miner: CoinAddress = signing_key.verifying_key().into();
+        let reward = Cash::genesis_reward(subsidy, miner.clone());
         let unconfirmed = UnconfirmedBlock {
             seqno: 0,
             difficulty,
             prev_id: Sha256Hash([0; 32]),
             transactions: Vec::new(),
+            reward,
             miner,
             timestamp,
         };
 
         unconfirmed.try_confirm(&mut signing_key).unwrap()
+    }
+
+    pub fn miner(&self) -> &CoinAddress {
+        &self.inner.miner
+    }
+
+    pub fn reward(&self) -> &Cash {
+        &self.inner.reward
     }
 
     pub fn id(&self) -> BlockId {
@@ -134,14 +151,15 @@ impl Display for Block {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Block: seqno: {}, difficulty: {}, id: {}, prev_id: {}, miner: {}, timestamp: {}, nouce: {}, ",
+            "Block: seqno: {}, difficulty: {}, id: {}, prev_id: {}, miner: {}, timestamp: {}, nouce: {}, reward: {}, ",
             self.inner.seqno,
             self.inner.difficulty,
             self.id(),
             self.inner.prev_id,
             self.inner.miner,
             self.inner.timestamp,
-            self.inner.nonce
+            self.inner.nonce,
+            self.inner.reward,
         )?;
         write!(f, ", transactions: ")?;
         write!(f, "[")?;
@@ -158,6 +176,7 @@ pub struct UnconfirmedBlock {
     difficulty: Difficulty,
     prev_id: BlockId,
     transactions: Vec<Transaction>,
+    reward: Cash,
     miner: CoinAddress,
     timestamp: Timestamp,
 }
@@ -203,11 +222,16 @@ impl UnconfirmedBlock {
         } else {
             prev.difficulty()
         };
+        let subsidy =
+            config.initial_block_subsidy() >> (seqno / config.block_subsidy_half_period());
+        let fees = txns.iter().map(|txn| txn.fee()).sum::<u64>();
+        let reward = Cash::new(subsidy + fees, miner.clone());
         Ok(Self {
             seqno,
             difficulty,
             prev_id: prev.id(),
             transactions: txns,
+            reward,
             miner,
             timestamp,
         })
@@ -223,6 +247,7 @@ impl UnconfirmedBlock {
             difficulty: self.difficulty,
             prev_id: self.prev_id,
             transactions: self.transactions,
+            reward: self.reward,
             miner: self.miner,
             timestamp: self.timestamp,
             nonce,

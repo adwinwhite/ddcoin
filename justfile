@@ -2,8 +2,9 @@
 hello: 
   echo "Just hello!"
 
-test:
-  cargo test --features test_util
+test *ARGS:
+  export RUST_LOG="iroh=off,ddcoin=debug"
+  cargo test --features test_util {{ARGS}}
 
 build:
   cargo build

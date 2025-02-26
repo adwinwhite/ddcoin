@@ -14,7 +14,7 @@ use crate::{
     Block, Config,
     block::{BlockId, SequenceNo},
     peer::{BroadcastMessage, PeerMessage},
-    transaction::{Transaction, TransactionId},
+    transaction::{Cash, Transaction, TransactionId},
     util::{Timestamp, TimestampExt},
 };
 
@@ -75,7 +75,27 @@ impl<'a> Deref for BlockChain<'a> {
     }
 }
 
+struct CashSet {
+    block_id: BlockId,
+    set: HashSet<Cash>,
+}
+
+impl CashSet {
+    fn new(block_id: BlockId) -> Self {
+        Self {
+            block_id,
+            set: HashSet::new(),
+        }
+    }
+
+    fn contains(&self, cash: &Cash) -> bool {
+        self.set.contains(cash)
+    }
+}
+
 pub struct PeerHubActorState {
+    // Current unspent cash set.
+    cash_set: CashSet,
     config: Config,
     genesis_id: BlockId,
     peers: HashMap<NodeId, SendStream>,
@@ -94,11 +114,15 @@ pub struct PeerHubActorState {
 impl PeerHubActorState {
     pub fn new(local_node_id: NodeId, config: Config) -> Self {
         let mut blocks = HashMap::new();
-        let genesis_block =
-            Block::create_genesis(*config.genesis_difficulty(), config.genesis_timestamp());
+        let genesis_block = Block::create_genesis(
+            *config.genesis_difficulty(),
+            config.genesis_timestamp(),
+            config.initial_block_subsidy(),
+        );
         let genesis_id = genesis_block.id();
         blocks.insert(genesis_id, genesis_block);
         Self {
+            cash_set: CashSet::new(genesis_id),
             config,
             genesis_id,
             peers: HashMap::new(),
@@ -170,7 +194,17 @@ impl PeerHubActorState {
             || self.invalid_blocks.contains(block_id)
     }
 
-    // TODO: rewrite using safe code.
+    // It's reversed.
+    fn ancestors_id(&self, block_id: BlockId) -> impl Iterator<Item = BlockId> {
+        let mut current_id = block_id;
+        std::iter::from_fn(move || {
+            let block = self.valid_blocks.get(&current_id)?;
+            current_id = block.prev_id();
+            Some(block.id())
+        })
+    }
+
+    // TODO: rewrite using safe code. Like above.
     fn confirmed_chain<'a>(&'a self) -> BlockChain<'a> {
         let mut block_id = self.leading_block;
         let mut blocks =
@@ -318,6 +352,53 @@ impl PeerHubActorState {
                 return Vec::new();
             }
 
+            // TODO: add tests for this.
+            // Check transactions' cash.
+            let Some(cash_set) = self.cash_set_at(&block.prev_id()) else {
+                warn!("Cannot get cash set for block {}", block.prev_id(),);
+                Self::add_invalid_block(
+                    &mut self.invalid_blocks,
+                    &mut self.next_blocks,
+                    block.id(),
+                );
+                return Vec::new();
+            };
+            for txn in block.transactions() {
+                for input in txn.inputs() {
+                    if !cash_set.contains(input) {
+                        warn!(
+                            "Block {} has invalid input {} in transaction {}",
+                            block.id(),
+                            input,
+                            txn.id()
+                        );
+                        Self::add_invalid_block(
+                            &mut self.invalid_blocks,
+                            &mut self.next_blocks,
+                            block.id(),
+                        );
+                        return Vec::new();
+                    }
+                }
+            }
+
+            // Check reward.
+            let expected_reward = self.config.initial_block_subsidy()
+                >> (block.seqno() / self.config.block_subsidy_half_period());
+            if block.reward().amount() != expected_reward {
+                warn!(
+                    "Block {} has invalid reward, expected {}",
+                    block.id(),
+                    expected_reward
+                );
+                Self::add_invalid_block(
+                    &mut self.invalid_blocks,
+                    &mut self.next_blocks,
+                    block.id(),
+                );
+                return Vec::new();
+            }
+
             self.add_valid_block(block)
         } else {
             // Ambiguous, the previous block is missing.
@@ -329,8 +410,62 @@ impl PeerHubActorState {
             Vec::new()
         }
     }
+
+    // Needs mechanics to reduce rewinding.
+    fn cash_set_at(&mut self, block_id: &BlockId) -> Option<&CashSet> {
+        // Rewind to common ancestor.
+        let mut ancestors_id: Vec<_> = self.ancestors_id(*block_id).collect();
+        ancestors_id.reverse();
+        ancestors_id.push(*block_id);
+        let ancestors_id = ancestors_id;
+
+        let mut current_id = self.cash_set.block_id;
+        loop {
+            if ancestors_id.contains(&current_id) {
+                break;
+            }
+            let block = self.valid_blocks.get(&current_id)?;
+            current_id = block.prev_id();
+        }
+        let common_ancestor = current_id;
+
+        let mut current_id = self.cash_set.block_id;
+        loop {
+            if current_id == common_ancestor {
+                break;
+            }
+            let block = self.valid_blocks.get(&current_id)?;
+            self.cash_set.set.remove(block.reward());
+            for txn in block.transactions().iter().rev() {
+                for output in txn.outputs().iter().rev() {
+                    self.cash_set.set.remove(output);
+                }
+                for input in txn.inputs().iter().rev() {
+                    self.cash_set.set.insert(input.clone());
+                }
+            }
+            current_id = block.prev_id();
+        }
+
+        // Update to required block_id.
+        let common_ancestor_index = ancestors_id.iter().position(|id| id == &common_ancestor)?;
+        for id in &ancestors_id[common_ancestor_index..] {
+            let block = self.valid_blocks.get(id)?;
+            for txn in block.transactions() {
+                for input in txn.inputs() {
+                    self.cash_set.set.remove(input);
+                }
+                for output in txn.outputs() {
+                    self.cash_set.set.insert(output.clone());
+                }
+            }
+            self.cash_set.set.insert(block.reward().clone());
+        }
+        Some(&self.cash_set)
+    }
 }
-type Amount = u64;
+
+type Fee = u64;
 
 // FIXME: optimize enum size here.
 #[allow(clippy::large_enum_variant)]
@@ -354,7 +489,7 @@ pub enum PeerHubActorMessage {
     QueryBlock(BlockId, RpcReplyPort<Option<Block>>),
     QueryPeers(RpcReplyPort<Vec<NodeId>>),
     QueryLocalNodeId(RpcReplyPort<NodeId>),
-    QueryMemPool(RpcReplyPort<Vec<(TransactionId, Amount)>>),
+    QueryMemPool(RpcReplyPort<Vec<(TransactionId, Fee)>>),
     QueryLeadingBlock(RpcReplyPort<BlockId>),
     QueryDifficultyAdjustTime(SequenceNo, RpcReplyPort<Timestamp>),
 }
@@ -615,7 +750,7 @@ impl Actor for PeerHubActor {
                 let amounts = state
                     .mempool
                     .iter()
-                    .map(|(txn_id, txn)| (*txn_id, txn.amount()))
+                    .map(|(txn_id, txn)| (*txn_id, txn.fee()))
                     .collect::<Vec<_>>();
                 reply.send(amounts)?;
             }

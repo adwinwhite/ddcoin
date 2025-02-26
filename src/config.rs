@@ -22,6 +22,8 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    initial_block_subsidy: u64,
+    block_subsidy_half_period: u64,
     difficulty_adjustment_period: u64,
     average_block_time: Duration,
     block_txn_limit: usize,
@@ -33,6 +35,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            initial_block_subsidy: 4096,
+            block_subsidy_half_period: 210_000,
             difficulty_adjustment_period: 2016,
             average_block_time: Duration::from_secs(60 * 10),
             block_txn_limit: 20,
@@ -47,12 +51,14 @@ impl Default for Config {
 impl Config {
     #[cfg(feature = "test_util")]
     pub const INCOMPLETE_TESTING_CONFIG: Self = Self {
-        alpn: Vec::new(),
+        initial_block_subsidy: 4096,
+        block_subsidy_half_period: 5,
         difficulty_adjustment_period: 10,
         average_block_time: Duration::from_millis(10),
         block_txn_limit: 20,
         genesis_difficulty: Difficulty::new(U256::from_words(u128::MAX >> 1, u128::MAX)),
         genesis_timestamp: Duration::from_secs(1737615026).as_nanos(),
+        alpn: Vec::new(),
     };
 
     #[cfg(feature = "test_util")]
@@ -62,6 +68,14 @@ impl Config {
             genesis_timestamp: Timestamp::now(),
             ..Self::INCOMPLETE_TESTING_CONFIG
         }
+    }
+
+    pub fn initial_block_subsidy(&self) -> u64 {
+        self.initial_block_subsidy
+    }
+
+    pub fn block_subsidy_half_period(&self) -> u64 {
+        self.block_subsidy_half_period
     }
 
     // Generate getters for fields.
