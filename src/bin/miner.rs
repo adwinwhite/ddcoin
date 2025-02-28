@@ -1,7 +1,7 @@
 #![feature(never_type)]
 
 use anyhow::Result;
-use ddcoin::{CoinAddress, PeerHubActorMessage, UnconfirmedBlock};
+use ddcoin::{CoinAddress, PeerHubActorMessage, UnconfirmedBlock, hub_helper::HubHelper};
 use ed25519_dalek::SigningKey;
 use ractor::concurrency::Duration;
 
@@ -29,11 +29,7 @@ impl MinerConfig {
         };
         let difficulty_adjustment_period = peerhub_config.difficulty_adjustment_period();
         loop {
-            let leading_block = {
-                let id = ractor::call!(peer_hub, PeerHubActorMessage::QueryLeadingBlock)?;
-                // peerhub is bound to have leading block otherwise something is going wrong.
-                ractor::call!(peer_hub, PeerHubActorMessage::QueryBlock, id)?.unwrap()
-            };
+            let leading_block = peer_hub.leading_block().await?;
             let mut fees = ractor::call!(peer_hub, PeerHubActorMessage::QueryMemPool)?;
             fees.sort_by_key(|k| k.1);
             let top_ids = fees
@@ -90,10 +86,13 @@ async fn main() -> Result<!> {
 #[cfg(feature = "test_util")]
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use anyhow::Result;
     use tokio::task::JoinSet;
 
-    use ddcoin::test_util::config_with_random_alpn;
+    use ddcoin::hub_helper::HubHelper;
+    use ddcoin::test_util::{config_with_random_alpn, random_address};
 
     use crate::MinerConfig;
 
@@ -101,32 +100,74 @@ mod tests {
     async fn test_single_node() -> Result<()> {
         let config = config_with_random_alpn();
         let mut tasks = JoinSet::new();
-        {
-            let mut csprng = rand::rngs::OsRng;
-            let signing_key = ed25519_dalek::SigningKey::generate(&mut csprng);
-            let miner: ddcoin::CoinAddress = signing_key.verifying_key().into();
-            let config = config.clone();
-            let miner_config = MinerConfig::new(signing_key, miner, config);
-            tasks.spawn(miner_config.run());
-        }
-        let (peer_hub, _peer_hub_handle) = config.run().await?;
+
+        let mut csprng = rand::rngs::OsRng;
+        let mut signing_key = ed25519_dalek::SigningKey::generate(&mut csprng);
+        let miner: ddcoin::CoinAddress = signing_key.verifying_key().into();
+        let miner_config = MinerConfig::new(signing_key.clone(), miner, config.clone());
+        tasks.spawn(miner_config.run());
+
+        let (peer_hub, _peer_hub_handle) = config.clone().run().await?;
 
         // Wait for peer discovery.
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-        // Wait for mining.
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        // Wait for mining so that our miner has some cash.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                // Check there's block mined
+                let leading_block = peer_hub.leading_block().await?;
+                if leading_block.seqno() > 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            anyhow::Ok(())
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("timeout mining the first block"))??;
 
-        // TODO: Check sent transactions are in blocks.
-        // Check there's block mined
-        let leading_id = ractor::call!(peer_hub, ddcoin::PeerHubActorMessage::QueryLeadingBlock)?;
-        let leading_block = ractor::call!(
-            peer_hub,
-            ddcoin::PeerHubActorMessage::QueryBlock,
-            leading_id
-        )?
-        .unwrap();
-        assert!(leading_block.seqno() > 0);
+        // Submit transactions.
+        let fourth_of_subsidy = config.initial_block_subsidy() / 4;
+        let txn_id0 = peer_hub
+            .new_transfer(
+                &mut signing_key,
+                &random_address(),
+                fourth_of_subsidy,
+                fourth_of_subsidy,
+            )
+            .await?;
+        let txn_id1 = peer_hub
+            .new_transfer(
+                &mut signing_key,
+                &random_address(),
+                fourth_of_subsidy,
+                fourth_of_subsidy,
+            )
+            .await?;
+        // Check that transactions are in the chain.
+        // Wait for mining.
+        let initial_seqno = peer_hub.leading_block().await?.seqno();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                // Check there's block mined
+                let leading_block = peer_hub.leading_block().await?;
+                if leading_block.seqno() > initial_seqno {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            anyhow::Ok(())
+        })
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("timeout mining the first block after submitting transactions")
+        })??;
+
+        let depth0 = peer_hub.transaction_depth(txn_id0).await?;
+        assert!(depth0.is_some());
+        let depth1 = peer_hub.transaction_depth(txn_id1).await?;
+        assert!(depth1.is_some());
 
         Ok(())
     }

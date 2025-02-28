@@ -383,8 +383,14 @@ impl PeerHubActorState {
             }
 
             // Check reward.
-            let expected_reward = self.config.initial_block_subsidy()
+            let expected_subsidy = self.config.initial_block_subsidy()
                 >> (block.seqno() / self.config.block_subsidy_half_period());
+            let expected_fees = block
+                .transactions()
+                .iter()
+                .map(|txn| txn.fee())
+                .sum::<u64>();
+            let expected_reward = expected_fees + expected_subsidy;
             if block.reward().amount() != expected_reward {
                 warn!(
                     "Block {} has invalid reward, expected {}",
@@ -492,6 +498,7 @@ pub enum PeerHubActorMessage {
     QueryMemPool(RpcReplyPort<Vec<(TransactionId, Fee)>>),
     QueryLeadingBlock(RpcReplyPort<BlockId>),
     QueryDifficultyAdjustTime(SequenceNo, RpcReplyPort<Timestamp>),
+    QueryLeadingCashSet(RpcReplyPort<HashSet<Cash>>),
 }
 
 impl Display for PeerHubActorMessage {
@@ -555,6 +562,9 @@ impl Display for PeerHubActorMessage {
             }
             PeerHubActorMessage::QueryDifficultyAdjustTime(seqno, _rpc_reply_port) => {
                 write!(f, "QueryDifficultyAdjustTime({})", seqno)
+            }
+            PeerHubActorMessage::QueryLeadingCashSet(_) => {
+                write!(f, "QueryLeadingCashSet")
             }
         }
     }
@@ -780,6 +790,11 @@ impl Actor for PeerHubActor {
             PeerHubActorMessage::QueryDifficultyAdjustTime(seqno, reply) => {
                 let adjustment_block = state.prev_difficulty_adjusted_block(seqno);
                 reply.send(adjustment_block.timestamp())?;
+            }
+            PeerHubActorMessage::QueryLeadingCashSet(reply) => {
+                let leading_block_id = state.leading_block;
+                let cashset = state.cash_set_at(&leading_block_id).unwrap(/* leading block must be on known chain */);
+                reply.send(cashset.set.clone())?;
             }
         }
         Ok(())

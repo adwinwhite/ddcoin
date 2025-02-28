@@ -36,6 +36,10 @@ impl Cash {
     pub fn amount(&self) -> u64 {
         self.amount
     }
+
+    pub fn owner(&self) -> &CoinAddress {
+        &self.owner
+    }
 }
 
 impl Display for Cash {
@@ -58,6 +62,12 @@ pub struct CoinAddress {
 impl CoinAddress {
     pub const fn from_bytes(bytes: &[u8; 32]) -> Self {
         Self { pub_key: *bytes }
+    }
+
+    pub fn from_signer(signing_key: &ed25519_dalek::SigningKey) -> Self {
+        Self {
+            pub_key: signing_key.verifying_key().to_bytes(),
+        }
     }
 }
 
