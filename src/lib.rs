@@ -4,6 +4,7 @@
 
 mod block;
 mod config;
+pub mod hub_helper;
 mod new_peer_watcher;
 mod peer;
 mod peerhub;
@@ -33,6 +34,7 @@ pub async fn run() -> Result<(ActorRef<PeerHubActorMessage>, JoinHandle<()>)> {
 mod tests {
     use std::time::Duration;
 
+    use crate::hub_helper::HubHelper;
     use crate::test_util::{
         config_with_random_alpn, create_empty_block, create_empty_chain, create_invalid_block,
         create_invalid_transaction, create_transaction,
@@ -67,7 +69,7 @@ mod tests {
             // Wait for connection.
             tokio::time::sleep(Duration::from_secs(5)).await;
 
-            let peers = ractor::call!(peer_hub, PeerHubActorMessage::QueryPeers)?;
+            let peers = peer_hub.peers().await?;
             Ok(peers.len())
         }
         let mut tasks = JoinSet::new();
@@ -111,15 +113,27 @@ mod tests {
         tasks.spawn(async move {
             let (peer_hub, _peer_hub_handle) = config.run_with_local_discovery().await?;
             // Wait for connection and transactions.
-            tokio::time::sleep(Duration::from_secs(5)).await;
-
-            // Check if transactions are propagated.
-            let recv_txn1 =
-                ractor::call!(peer_hub, PeerHubActorMessage::QueryTransaction, txn1.id())?;
-            assert_eq!(recv_txn1, Some(txn1));
-            let recv_txn2 =
-                ractor::call!(peer_hub, PeerHubActorMessage::QueryTransaction, txn2.id())?;
-            assert_eq!(recv_txn2, Some(txn2));
+            tokio::time::timeout(Duration::from_secs(8), async {
+                // Check if transactions are propagated.
+                let recv_txn1 = loop {
+                    let Some(txn) = peer_hub.get_transaction(txn1.id()).await? else {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    };
+                    break txn;
+                };
+                assert_eq!(recv_txn1, txn1);
+                let recv_txn2 = loop {
+                    let Some(txn) = peer_hub.get_transaction(txn2.id()).await? else {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    };
+                    break txn;
+                };
+                assert_eq!(recv_txn2, txn2);
+                anyhow::Ok(())
+            })
+            .await??;
 
             anyhow::Ok(())
         });

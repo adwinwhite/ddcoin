@@ -35,7 +35,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            initial_block_subsidy: 4096,
+            initial_block_subsidy: 1 << 60,
             block_subsidy_half_period: 210_000,
             difficulty_adjustment_period: 2016,
             average_block_time: Duration::from_secs(60 * 10),
@@ -51,8 +51,8 @@ impl Default for Config {
 impl Config {
     #[cfg(feature = "test_util")]
     pub const INCOMPLETE_TESTING_CONFIG: Self = Self {
-        initial_block_subsidy: 4096,
-        block_subsidy_half_period: 5,
+        initial_block_subsidy: 1 << 60,
+        block_subsidy_half_period: 40,
         difficulty_adjustment_period: 10,
         average_block_time: Duration::from_millis(10),
         block_txn_limit: 20,

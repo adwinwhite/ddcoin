@@ -7,6 +7,12 @@ use crate::{
     util::{Difficulty, Timestamp, hex_to_bytes},
 };
 
+pub fn random_address() -> CoinAddress {
+    let mut csprng = rand::rngs::OsRng;
+    let signing_key = SigningKey::generate(&mut csprng);
+    signing_key.verifying_key().into()
+}
+
 pub fn config_with_random_alpn() -> Config {
     let mut alpn = vec![0; 16];
     for byte in alpn.iter_mut() {
