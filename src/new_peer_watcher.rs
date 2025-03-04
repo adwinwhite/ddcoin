@@ -41,7 +41,7 @@ impl NewPeerStreamSubscriber {
             select! {
                 item = self.stream.next() => {
                     let item = item.context("New peer stream ended")?;
-                    let node_id = item.node_addr.node_id;
+                    let node_id = item.node_id();
                     if known_ids.contains(&node_id) {
                         continue;
                     } else {
@@ -55,7 +55,7 @@ impl NewPeerStreamSubscriber {
                         continue;
                     }
 
-                    let conn = match self.endpoint.connect(item.node_addr, &self.alpn).await {
+                    let conn = match self.endpoint.connect(item.into_node_addr(), &self.alpn).await {
                         Ok(conn) => conn,
                         Err(e) => {
                             warn!("Failed to connect to remote: {:?}", e);
