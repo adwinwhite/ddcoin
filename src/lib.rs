@@ -17,14 +17,14 @@ pub mod test_util;
 
 pub use block::{Block, UnconfirmedBlock};
 pub use config::Config;
+use config::HubHandle;
 pub use peerhub::PeerHubActorMessage;
 pub use transaction::{CoinAddress, Transaction};
 
 use anyhow::Result;
 use ractor::ActorRef;
-use tokio::task::JoinHandle;
 
-pub async fn run() -> Result<(ActorRef<PeerHubActorMessage>, JoinHandle<()>)> {
+pub async fn run() -> Result<(ActorRef<PeerHubActorMessage>, HubHandle)> {
     Config::default().run().await
 }
 

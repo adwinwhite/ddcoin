@@ -1,11 +1,11 @@
 use anyhow::Result;
 use ed25519_dalek::SigningKey;
 use ractor::{ActorRef, concurrency::Duration};
-use tokio::task::JoinHandle;
 
 use crate::{
     Block, CoinAddress, Config, PeerHubActorMessage, Transaction, UnconfirmedBlock,
     block::{BlockId, SequenceNo},
+    config::HubHandle,
     hub_helper::HubHelper,
     transaction::{Cash, Signature},
     util::{Difficulty, Timestamp, hex_to_bytes},
@@ -152,14 +152,15 @@ pub fn create_invalid_block(chain: &[Block]) -> Block {
 pub async fn fully_connected(
     config: Config,
     n: usize,
-) -> Result<Box<[(ActorRef<PeerHubActorMessage>, JoinHandle<()>)]>> {
+) -> Result<Box<[(ActorRef<PeerHubActorMessage>, HubHandle)]>> {
     let nodes = {
         let futs = (0..n)
             .map(|_| config.clone().run_with_local_discovery())
             .collect::<Vec<_>>();
         let mut res = Vec::with_capacity(n);
         for fut in futs {
-            res.push(fut.await?);
+            let (node, handle) = fut.await?;
+            res.push((node, handle.into()));
         }
         res
     };
