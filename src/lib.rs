@@ -162,6 +162,7 @@ mod tests {
             let block = create_empty_block(&fork1);
             fork1.push(block);
         }
+        let correct_seqno = fork1.last().unwrap().seqno();
         let correct_leading_block = fork1.last().unwrap().id();
         let mut fork2 = old_chain[..old_chain.len() - 4].to_vec();
         for _ in 0..5 {
@@ -193,10 +194,16 @@ mod tests {
                     .unwrap();
             }
 
-            // Wait for blocks.
-            tokio::time::sleep(Duration::from_secs(3)).await;
             // Check if the leading block is correct.
-            let leading_id = nodes[1].0.leading_block().await.unwrap().id();
+            let leading_id = loop {
+                let seqno = nodes[1].0.leading_block().await.unwrap().seqno();
+                if seqno < correct_seqno {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                } else {
+                    break nodes[1].0.leading_block().await.unwrap().id();
+                }
+            };
             assert_eq!(leading_id, correct_leading_block);
         })
         .await
