@@ -37,6 +37,8 @@ pub trait HubHelper: private::Sealed {
     fn get_block(&self, id: BlockId) -> impl Future<Output = Result<Option<Block>>> + Send;
 
     fn peers(&self) -> impl Future<Output = Result<Vec<NodeId>>> + Send;
+
+    fn id(&self) -> impl Future<Output = Result<NodeId>> + Send;
 }
 
 impl private::Sealed for ActorRef<PeerHubActorMessage> {}
@@ -100,5 +102,9 @@ impl HubHelper for ActorRef<PeerHubActorMessage> {
 
     async fn peers(&self) -> Result<Vec<NodeId>> {
         ractor::call!(self, PeerHubActorMessage::QueryPeers).map_err(Into::into)
+    }
+
+    async fn id(&self) -> Result<NodeId> {
+        ractor::call!(self, PeerHubActorMessage::QueryLocalNodeId).map_err(Into::into)
     }
 }

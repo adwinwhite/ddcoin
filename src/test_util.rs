@@ -1,8 +1,12 @@
+use anyhow::Result;
 use ed25519_dalek::SigningKey;
+use ractor::{ActorRef, concurrency::Duration};
+use tokio::task::JoinHandle;
 
 use crate::{
-    Block, CoinAddress, Config, Transaction, UnconfirmedBlock,
+    Block, CoinAddress, Config, PeerHubActorMessage, Transaction, UnconfirmedBlock,
     block::{BlockId, SequenceNo},
+    hub_helper::HubHelper,
     transaction::{Cash, Signature},
     util::{Difficulty, Timestamp, hex_to_bytes},
 };
@@ -143,4 +147,31 @@ pub fn create_invalid_block(chain: &[Block]) -> Block {
     let new_miner = signing_key.verifying_key().into();
     block_viewer.inner.miner = new_miner;
     unsafe { std::mem::transmute(block_viewer) }
+}
+
+pub async fn fully_connected(
+    config: Config,
+    n: usize,
+) -> Result<Box<[(ActorRef<PeerHubActorMessage>, JoinHandle<()>)]>> {
+    let nodes = {
+        let futs = (0..n)
+            .map(|_| config.clone().run_with_local_discovery())
+            .collect::<Vec<_>>();
+        let mut res = Vec::with_capacity(n);
+        for fut in futs {
+            res.push(fut.await?);
+        }
+        res
+    };
+    for (hub, _) in &nodes {
+        loop {
+            let peers = hub.peers().await?;
+            if peers.len() == n - 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    Ok(nodes.into())
 }
